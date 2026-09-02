@@ -58,7 +58,7 @@ def handle_text(message):
         # Создаём новый чат с ИСПРАВЛЕННОЙ моделью
         if chat_id not in user_chats:
             user_chats[chat_id] = client.chats.create(
-                model="gemini-2.5-flash",  # <--- ИСПРАВЛЕНО
+                model="gemini-3.6-flash",  # <--- ИСПРАВЛЕНО
                 config=types.GenerateContentConfig(
                     system_instruction=(
                         "Ты вежливый, умный и полезный ассистент. "
