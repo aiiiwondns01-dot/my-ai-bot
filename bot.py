@@ -5,11 +5,11 @@ import telebot
 from google import genai
 from google.genai import types
 
-# === КЛЮЧИ (лучше через переменные окружения на Render) ===
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8975360035:AAFjoKwlEZH74H2EJTHAkIXTTMkXoBtm6es"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AQ.Ab8RN6LTaeguTtaj4F-ZmF57LX2oXXckGdat90nsp4KmQUeJ0Q"
+# === КЛЮЧИ ===
+TELEGRAM_TOKEN = os.environ.get("8975360035:AAFjoKwlEZH74H2EJTHAkIXTTMkXoBtm6es")
+GEMINI_API_KEY = os.environ.get("AQ.Ab8RN6LS9HF-BLOuCEgyMQhsL9lLJHGnHI6BmrrCkT70Cfi6RA")
 
-# Новый клиент
+# Клиент Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -28,7 +28,7 @@ def run_flask():
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Привет! Я твой личный ИИ-ассистент.\nЗадай мне любой вопрос!")
+    bot.reply_to(message, "Привет! Я твой ИИ-ассистент на Gemini 3.8 Flash.\nЗадай любой вопрос!")
 
 @bot.message_handler(commands=['reset'])
 def reset_memory(message):
@@ -44,36 +44,32 @@ def handle_text(message):
 
     try:
         if chat_id not in user_chats:
-            # Создаём чат с системной инструкцией
             user_chats[chat_id] = client.chats.create(
-                model="gemini-3.5-flash",   # или gemini-2.0-flash / gemini-3.5-flash
+                model="gemini-3.8-flash",
                 config=types.GenerateContentConfig(
-                    system_instruction="Ты вежливый и умный ассистент. Отвечай понятно, структурировано и по делу."
+                    system_instruction="Ты вежливый, умный и полезный ассистент. Отвечай понятно, структурировано и по делу."
                 )
             )
 
         chat = user_chats[chat_id]
         response = chat.send_message(message.text)
+        answer = response.text
 
-        text = response.text
-
-        # Разбиваем длинный ответ
-        if len(text) > 4000:
-            for i in range(0, len(text), 4000):
-                bot.send_message(chat_id, text[i:i+4000])
+        if len(answer) > 4000:
+            for i in range(0, len(answer), 4000):
+                bot.send_message(chat_id, answer[i:i+4000])
         else:
-            try:
-                bot.reply_to(message, text, parse_mode='Markdown')
-            except Exception:
-                bot.reply_to(message, text)
+            bot.reply_to(message, answer)
 
     except Exception as e:
-        print(f"Ошибка Gemini API: {e}")
-        bot.reply_to(message, f"Ошибка при запросе к ИИ: {e}")
+        print(f"Ошибка Gemini: {e}")
+        bot.reply_to(message, f"Ошибка при запросе к ИИ:\n{e}")
 
 if __name__ == '__main__':
+    # Запускаем Flask в отдельном потоке
     server_thread = Thread(target=run_flask)
     server_thread.daemon = True
     server_thread.start()
-    
+
+    print("Бот запущен...")
     bot.polling(none_stop=True)
