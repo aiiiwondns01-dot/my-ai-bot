@@ -5,8 +5,8 @@ import telebot
 import google.generativeai as genai
 
 # === КЛЮЧИ ===
-TELEGRAM_TOKEN = "8975360035:AAEzxJ3mKfBCC5sFtG_hGBzqFvs8KCsx0mY"
-GEMINI_API_KEY = "AQ.Ab8RN6JmcNQiWfgOcZ6aNncl67e5oq0NOhgu1B3-fcIQQGsquQ"
+TELEGRAM_TOKEN = "8975360035:AAFjoKwlEZH74H2EJTHAkIXTTMkXoBtm6es"
+GEMINI_API_KEY = "AQ.Ab8RN6LTaeguTtaj4F-ZmF57LX2oXXckGdat90nsp4KmQUeJ0Q"
 
 # Инициализация API
 genai.configure(api_key=GEMINI_API_KEY)
