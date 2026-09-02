@@ -46,7 +46,7 @@ def handle_text(message):
         if chat_id not in user_chats:
             # Создаём чат с системной инструкцией
             user_chats[chat_id] = client.chats.create(
-                model="gemini-2.5-flash",   # или gemini-2.0-flash / gemini-3.5-flash
+                model="gemini-3.5-flash",   # или gemini-2.0-flash / gemini-3.5-flash
                 config=types.GenerateContentConfig(
                     system_instruction="Ты вежливый и умный ассистент. Отвечай понятно, структурировано и по делу."
                 )
