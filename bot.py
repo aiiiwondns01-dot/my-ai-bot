@@ -6,8 +6,14 @@ from google import genai
 from google.genai import types
 
 # ====================== КЛЮЧИ ======================
-TELEGRAM_TOKEN = "8975360035:AAFjoKwlEZH74H2EJTHAkIXTTMkXoBtm6es"
-GEMINI_API_KEY = "AQ.Ab8RN6In2pgzUgwjVwDSqIhukD_nxha-boweIsivw0AnqsACaQ"   
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN не найден в переменных окружения!")
+
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY не найден в переменных окружения!")
 
 # ====================== ИНИЦИАЛИЗАЦИЯ ======================
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -49,13 +55,15 @@ def handle_text(message):
     bot.send_chat_action(chat_id, 'typing')
 
     try:
+        # Создаём новый чат, если его ещё нет
         if chat_id not in user_chats:
             user_chats[chat_id] = client.chats.create(
                 model="gemini-3.8-flash",
                 config=types.GenerateContentConfig(
                     system_instruction=(
                         "Ты вежливый, умный и полезный ассистент. "
-                        "Отвечай понятно, структурировано и по делу."
+                        "Отвечай понятно, структурировано и по делу. "
+                        "Если нужно — используй списки и выделения."
                     )
                 )
             )
@@ -64,6 +72,7 @@ def handle_text(message):
         response = chat.send_message(message.text)
         answer = response.text
 
+        # Разбиваем длинные ответы
         if len(answer) > 4000:
             for i in range(0, len(answer), 4000):
                 bot.send_message(chat_id, answer[i:i + 4000])
@@ -71,13 +80,15 @@ def handle_text(message):
             bot.reply_to(message, answer)
 
     except Exception as e:
-        print(f"Ошибка Gemini: {e}")
-        bot.reply_to(message, f"Произошла ошибка:\n{e}")
+        error_text = str(e)
+        print(f"Ошибка Gemini: {error_text}")
+        bot.reply_to(message, f"Произошла ошибка при обращении к ИИ:\n\n{error_text}")
 
 # ====================== ЗАПУСК ======================
 if __name__ == '__main__':
+    # Запускаем Flask в фоне
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    print("Бот запущен...")
-    bot.polling(none_stop=True)
+    print("Бот успешно запущен...")
+    bot.polling(none_stop=True, interval=1)
