@@ -9,15 +9,16 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN не найден!")
+    raise ValueError("TELEGRAM_TOKEN не найден в переменных окружения!")
+
 if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY не найден!")
+    raise ValueError("GROQ_API_KEY не найден в переменных окружения!")
 
 # ====================== ИНИЦИАЛИЗАЦИЯ ======================
 client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-user_chats = {}
+user_histories = {}
 
 # ====================== FLASK ======================
 app = Flask(__name__)
@@ -35,7 +36,7 @@ def run_flask():
 def send_welcome(message):
     bot.reply_to(
         message,
-        "Привет! Я твой ИИ-ассистент на базе Groq (Llama 3.3 70B).\n"
+        "Привет! Я твой ИИ-ассистент на базе Groq.\n"
         "Просто напиши мне любой вопрос.\n\n"
         "Команда /reset — сбросить историю диалога."
     )
@@ -43,8 +44,8 @@ def send_welcome(message):
 @bot.message_handler(commands=['reset'])
 def reset_memory(message):
     chat_id = message.chat.id
-    if chat_id in user_chats:
-        del user_chats[chat_id]
+    if chat_id in user_histories:
+        del user_histories[chat_id]
     bot.reply_to(message, "История диалога успешно сброшена.")
 
 @bot.message_handler(func=lambda message: True, content_types=['text'])
@@ -53,46 +54,43 @@ def handle_text(message):
     bot.send_chat_action(chat_id, 'typing')
 
     try:
-        if chat_id not in user_chats:
-            user_chats[chat_id] = [
+        if chat_id not in user_histories:
+            user_histories[chat_id] = [
                 {
                     "role": "system",
-                    "content": "Ты вежливый, умный и полезный ассистент. Отвечай понятно, структурировано и по делу."
+                    "content": (
+                        "Ты вежливый, умный и полезный ассистент. "
+                        "Отвечай понятно, структурировано и по делу."
+                    )
                 }
             ]
 
-        user_chats[chat_id].append({
-            "role": "user",
-            "content": message.text
-        })
+        user_histories[chat_id].append({"role": "user", "content": message.text})
 
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=user_chats[chat_id],
+        if len(user_histories[chat_id]) > 11:
+            user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-10:]
+
+        # Используем проверенную модель Groq
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=user_histories[chat_id],
             temperature=0.7,
-            max_tokens=2048
+            max_tokens=2048,
         )
 
-        answer = response.choices[0].message.content
+        bot_response = completion.choices[0].message.content
+        user_histories[chat_id].append({"role": "assistant", "content": bot_response})
 
-        user_chats[chat_id].append({
-            "role": "assistant",
-            "content": answer
-        })
-
-        # Ограничиваем историю
-        if len(user_chats[chat_id]) > 21:
-            user_chats[chat_id] = user_chats[chat_id][:1] + user_chats[chat_id][-20:]
-
-        if len(answer) > 4000:
-            for i in range(0, len(answer), 4000):
-                bot.send_message(chat_id, answer[i:i+4000])
+        if len(bot_response) > 4000:
+            for i in range(0, len(bot_response), 4000):
+                bot.send_message(chat_id, bot_response[i:i + 4000])
         else:
-            bot.reply_to(message, answer)
+            bot.reply_to(message, bot_response, parse_mode='Markdown')
 
     except Exception as e:
-        print(f"Ошибка Groq: {e}")
-        bot.reply_to(message, f"Произошла ошибка:\n{e}")
+        error_text = str(e)
+        print(f"Ошибка Groq: {error_text}")
+        bot.reply_to(message, f"Произошла ошибка при обращении к ИИ:\n\n{error_text}")
 
 # ====================== ЗАПУСК ======================
 if __name__ == '__main__':
@@ -100,4 +98,4 @@ if __name__ == '__main__':
     flask_thread.start()
 
     print("Бот успешно запущен...")
-    bot.polling(none_stop=True)
+    bot.polling(none_stop=True, interval=1)
