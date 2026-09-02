@@ -37,7 +37,7 @@ def run_flask():
 def send_welcome(message):
     bot.reply_to(
         message,
-        "Привет! Я твой ИИ-ассистент на базе Gemini 3.8 Flash.\n"
+        "Привет! Я твой ИИ-ассистент на базе Gemini.\n"
         "Просто напиши мне любой вопрос.\n\n"
         "Команда /reset — сбросить историю диалога."
     )
@@ -55,10 +55,10 @@ def handle_text(message):
     bot.send_chat_action(chat_id, 'typing')
 
     try:
-        # Создаём новый чат, если его ещё нет
+        # Создаём новый чат с ИСПРАВЛЕННОЙ моделью
         if chat_id not in user_chats:
             user_chats[chat_id] = client.chats.create(
-                model="gemini-3.8-flash",
+                model="gemini-2.5-flash",  # <--- ИСПРАВЛЕНО
                 config=types.GenerateContentConfig(
                     system_instruction=(
                         "Ты вежливый, умный и полезный ассистент. "
@@ -86,7 +86,6 @@ def handle_text(message):
 
 # ====================== ЗАПУСК ======================
 if __name__ == '__main__':
-    # Запускаем Flask в фоне
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
