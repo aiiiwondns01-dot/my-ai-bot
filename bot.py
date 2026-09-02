@@ -106,9 +106,9 @@ def process_ai_response(chat_id, user_text, message_to_reply):
         if len(user_histories[chat_id]) > 31:
             user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-30:]
 
-        # Первый запрос к модели с поддержкой инструментов (Tools)
+        # Основная текстовая модель с поддержкой инструментов
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=user_histories[chat_id],
             tools=tools,
             tool_choice="auto",
@@ -118,7 +118,6 @@ def process_ai_response(chat_id, user_text, message_to_reply):
 
         response_message = response.choices[0].message
 
-        # Проверяем, захотела ли модель вызвать функцию напоминания
         if response_message.tool_calls:
             user_histories[chat_id].append(response_message)
             
@@ -128,10 +127,8 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                     mins = args.get("minutes")
                     text = args.get("reminder_text")
                     
-                    # Выполняем функцию создания напоминания
                     tool_result = set_reminder_function(chat_id, mins, text)
                     
-                    # Возвращаем результат выполнения функции модели
                     user_histories[chat_id].append({
                         "tool_call_id": tool_call.id,
                         "role": "tool",
@@ -139,9 +136,8 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                         "content": tool_result
                     })
 
-            # Делаем второй запрос, чтобы модель красиво ответила пользователю
             second_response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=user_histories[chat_id],
                 temperature=0.7,
                 max_tokens=2048,
@@ -271,8 +267,9 @@ def handle_photo(message):
             ]
         })
 
+        # Мультимодальная модель для работы с изображениями
         completion = client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
+            model="qwen/qwen3.6-27b",
             messages=messages_payload,
             temperature=0.7,
             max_tokens=2048,
