@@ -1,5 +1,7 @@
 import os
+import json
 import base64
+from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
 import telebot
@@ -23,7 +25,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 user_histories = {}
 active_chat_ids = set()
 
-# ====================== FLASK ======================
+# ====================== FLASK (ДЛЯ RENDER) ======================
 app = Flask(__name__)
 
 @app.route('/')
@@ -34,35 +36,67 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# ====================== ПЛАНИРОВЩИК НАПОМИНАНИЙ ======================
-def send_scheduled_reminders():
-    """Фоновая рассылка напоминаний"""
-    for chat_id in active_chat_ids:
-        try:
-            bot.send_message(
-                chat_id, 
-                "⏰ **Автоматическое напоминание:**\n"
-                "Не забудьте сделать перерыв, размяться и выпить воды!"
-            )
-        except Exception as e:
-            print(f"Не удалось отправить напоминание чату {chat_id}: {e}")
+# ====================== СИСТЕМА НАПОМИНАНИЙ ======================
+def trigger_reminder(chat_id, text):
+    """Функция срабатывания напоминания по таймеру"""
+    try:
+        bot.send_message(
+            chat_id, 
+            f"⏰ **Напоминание:**\n{text}", 
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        print(f"Не удалось отправить напоминание чату {chat_id}: {e}")
+
+def set_reminder_function(chat_id, minutes, reminder_text):
+    """Инструмент, который вызывает нейросеть при запросе напоминания"""
+    try:
+        run_time = datetime.now() + timedelta(minutes=int(minutes))
+        scheduler.add_job(trigger_reminder, 'date', run_date=run_time, args=[chat_id, reminder_text])
+        return f"Успешно установлено напоминание через {minutes} мин. Текст: '{reminder_text}'."
+    except Exception as e:
+        return f"Ошибка при установке напоминания: {e}"
+
+# Описание функций (Tools) для Groq API
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder_function",
+            "description": "Установить напоминание для пользователя через определенное количество минут.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "minutes": {
+                        "type": "integer",
+                        "description": "Через сколько минут нужно напомнить (например, 10, 30, 60)."
+                    },
+                    "reminder_text": {
+                        "type": "string",
+                        "description": "Текст или суть напоминания."
+                    }
+                },
+                "required": ["minutes", "reminder_text"]
+            }
+        }
+    }
+]
 
 scheduler = BackgroundScheduler()
-# Напоминание каждый день в 10:00 утра
-scheduler.add_job(send_scheduled_reminders, 'cron', hour=10, minute=0)
 scheduler.start()
 
-# ====================== ОБЩАЯ ЛОГИКА ТЕКСТОВОГО ОТВЕТА ИИ ======================
+# ====================== ЛОГИКА ОБРАБОТКИ ИИ С TOOLS ======================
 def process_ai_response(chat_id, user_text, message_to_reply):
     try:
+        active_chat_ids.add(chat_id)
+        
         if chat_id not in user_histories:
             user_histories[chat_id] = [
                 {
                     "role": "system",
                     "content": (
                         "Ты вежливый, умный и полезный ассистент. "
-                        "Отвечай понятно, структурировано и по делу. "
-                        "Если нужно — используй списки и выделения."
+                        "Если пользователь просит о чем-то напомнить, обязательно используй функцию set_reminder_function."
                     )
                 }
             ]
@@ -72,21 +106,59 @@ def process_ai_response(chat_id, user_text, message_to_reply):
         if len(user_histories[chat_id]) > 31:
             user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-30:]
 
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+        # Первый запрос к модели с поддержкой инструментов (Tools)
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             messages=user_histories[chat_id],
+            tools=tools,
+            tool_choice="auto",
             temperature=0.7,
             max_tokens=2048,
         )
 
-        bot_response = completion.choices[0].message.content
-        user_histories[chat_id].append({"role": "assistant", "content": bot_response})
+        response_message = response.choices[0].message
 
-        if len(bot_response) > 4000:
-            for i in range(0, len(bot_response), 4000):
-                bot.send_message(chat_id, bot_response[i:i + 4000])
-        else:
+        # Проверяем, захотела ли модель вызвать функцию напоминания
+        if response_message.tool_calls:
+            user_histories[chat_id].append(response_message)
+            
+            for tool_call in response_message.tool_calls:
+                if tool_call.function.name == "set_reminder_function":
+                    args = json.loads(tool_call.function.arguments)
+                    mins = args.get("minutes")
+                    text = args.get("reminder_text")
+                    
+                    # Выполняем функцию создания напоминания
+                    tool_result = set_reminder_function(chat_id, mins, text)
+                    
+                    # Возвращаем результат выполнения функции модели
+                    user_histories[chat_id].append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": "set_reminder_function",
+                        "content": tool_result
+                    })
+
+            # Делаем второй запрос, чтобы модель красиво ответила пользователю
+            second_response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=user_histories[chat_id],
+                temperature=0.7,
+                max_tokens=2048,
+            )
+            bot_response = second_response.choices[0].message.content
+            user_histories[chat_id].append({"role": "assistant", "content": bot_response})
             bot.reply_to(message_to_reply, bot_response, parse_mode='Markdown')
+
+        else:
+            bot_response = response_message.content
+            user_histories[chat_id].append({"role": "assistant", "content": bot_response})
+
+            if len(bot_response) > 4000:
+                for i in range(0, len(bot_response), 4000):
+                    bot.send_message(chat_id, bot_response[i:i + 4000])
+            else:
+                bot.reply_to(message_to_reply, bot_response, parse_mode='Markdown')
 
     except Exception as e:
         error_text = str(e)
@@ -100,10 +172,9 @@ def send_welcome(message):
     bot.reply_to(
         message,
         "Привет! Я твой продвинутый ИИ-ассистент.\n"
-        "• Понимаю текст, голосовые и **кружочки** (видеосообщения).\n"
-        "• Анализирую **изображения** (фото с подписями).\n"
-        "• Запоминаю до 30 сообщений контекста.\n"
-        "• Умею присылать фоновые напоминания.\n\n"
+        "• Понимаю текст, голосовые и **кружочки**.\n"
+        "• Анализирую **изображения**.\n"
+        "• Умею ставить напоминания через голосовые или текст (просто скажи: *«напомни через 10 минут...»*).\n\n"
         "Команда /reset — сбросить историю диалога."
     )
 
@@ -117,15 +188,12 @@ def reset_memory(message):
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_text(message):
     chat_id = message.chat.id
-    active_chat_ids.add(chat_id)
     bot.send_chat_action(chat_id, 'typing')
     process_ai_response(chat_id, message.text, message)
 
-# Обработка голосовых сообщений и аудио
 @bot.message_handler(content_types=['voice', 'audio'])
 def handle_voice(message):
     chat_id = message.chat.id
-    active_chat_ids.add(chat_id)
     bot.send_chat_action(chat_id, 'typing')
 
     try:
@@ -140,7 +208,6 @@ def handle_voice(message):
         )
 
         user_text = transcription.strip() if isinstance(transcription, str) else transcription.text
-
         if not user_text:
             bot.reply_to(message, "Не удалось разобрать голосовое сообщение.")
             return
@@ -149,21 +216,18 @@ def handle_voice(message):
         process_ai_response(chat_id, user_text, message)
 
     except Exception as e:
-        print(f"Ошибка обработки голоса: {e}")
-        bot.reply_to(message, f"Не удалось обработать голосовое сообщение:\n{e}")
+        print(f"Ошибка голоса: {e}")
+        bot.reply_to(message, f"Не удалось обработать голосовое:\n{e}")
 
-# Обработка кружочков (видеосообщений)
 @bot.message_handler(content_types=['video_note'])
 def handle_video_note(message):
     chat_id = message.chat.id
-    active_chat_ids.add(chat_id)
     bot.send_chat_action(chat_id, 'typing')
 
     try:
         file_info = bot.get_file(message.video_note.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
 
-        # Whisper отлично принимает mp4 файлы видеосообщений для извлечения аудио
         transcription = client.audio.transcriptions.create(
             file=("videonote.mp4", downloaded_file),
             model="whisper-large-v3",
@@ -172,23 +236,20 @@ def handle_video_note(message):
         )
 
         user_text = transcription.strip() if isinstance(transcription, str) else transcription.text
-
         if not user_text:
-            bot.reply_to(message, "Не удалось разобрать видеосообщение.")
+            bot.reply_to(message, "Не удалось разобрать кружочек.")
             return
 
         bot.send_message(chat_id, f"🎥 *Распознано из кружочка:* {user_text}", parse_mode='Markdown')
         process_ai_response(chat_id, user_text, message)
 
     except Exception as e:
-        print(f"Ошибка видеосообщения: {e}")
+        print(f"Ошибка кружочка: {e}")
         bot.reply_to(message, f"Не удалось обработать видеосообщение:\n{e}")
 
-# Обработка изображений (фото) через мультимодальную модель
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     chat_id = message.chat.id
-    active_chat_ids.add(chat_id)
     bot.send_chat_action(chat_id, 'upload_photo')
 
     try:
@@ -196,14 +257,11 @@ def handle_photo(message):
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
 
-        caption = message.caption or "Опиши эту картинку и ответь на вопросы, если они есть."
+        caption = message.caption or "Опиши эту картинку."
 
         if chat_id not in user_histories:
-            user_histories[chat_id] = [
-                {"role": "system", "content": "Ты вежливый, умный и полезный ассистент."}
-            ]
+            user_histories[chat_id] = [{"role": "system", "content": "Ты полезный ассистент."}]
 
-        # Формируем запрос для мультимодальной модели
         messages_payload = user_histories[chat_id].copy()
         messages_payload.append({
             "role": "user",
@@ -214,16 +272,14 @@ def handle_photo(message):
         })
 
         completion = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",
+            model="llama-3.2-90b-vision-preview",
             messages=messages_payload,
             temperature=0.7,
             max_tokens=2048,
         )
 
         bot_response = completion.choices[0].message.content
-
-        # Сохраняем текстовое описание взаимодействия в общую историю чата
-        user_histories[chat_id].append({"role": "user", "content": f"[Отправлено изображение с подписью: {caption}]"})
+        user_histories[chat_id].append({"role": "user", "content": f"[Фото с подписью: {caption}]"})
         user_histories[chat_id].append({"role": "assistant", "content": bot_response})
 
         if len(user_histories[chat_id]) > 31:
@@ -236,7 +292,7 @@ def handle_photo(message):
             bot.reply_to(message, bot_response, parse_mode='Markdown')
 
     except Exception as e:
-        print(f"Ошибка обработки изображения: {e}")
+        print(f"Ошибка изображения: {e}")
         bot.reply_to(message, f"Не удалось обработать изображение:\n{e}")
 
 # ====================== ЗАПУСК ======================
