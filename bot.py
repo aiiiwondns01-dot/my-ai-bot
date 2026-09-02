@@ -6,7 +6,7 @@ import google.generativeai as genai
 
 # === КЛЮЧИ ===
 TELEGRAM_TOKEN = "8975360035:AAEzxJ3mKfBCC5sFtG_hGBzqFvs8KCsx0mY"
-GEMINI_API_KEY = "AQ.Ab8RN6LsldmFuTZM74M97oSQqoL6-ZUSMqcRILIPWoiJtjX_XQ"
+GEMINI_API_KEY = "AQ.Ab8RN6JmcNQiWfgOcZ6aNncl67e5oq0NOhgu1B3-fcIQQGsquQ"
 
 # Инициализация API
 genai.configure(api_key=GEMINI_API_KEY)
