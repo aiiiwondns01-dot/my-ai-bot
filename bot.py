@@ -9,16 +9,15 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN не найден в переменных окружения!")
-
+    raise ValueError("TELEGRAM_TOKEN не найден!")
 if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY не найден в переменных окружения!")
+    raise ValueError("GROQ_API_KEY не найден!")
 
 # ====================== ИНИЦИАЛИЗАЦИЯ ======================
 client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-user_histories = {}
+user_chats = {}
 
 # ====================== FLASK ======================
 app = Flask(__name__)
@@ -36,7 +35,7 @@ def run_flask():
 def send_welcome(message):
     bot.reply_to(
         message,
-        "Привет! Я твой ИИ-ассистент на базе Groq (Llama 3).\n"
+        "Привет! Я твой ИИ-ассистент на базе Groq (Llama 3.3 70B).\n"
         "Просто напиши мне любой вопрос.\n\n"
         "Команда /reset — сбросить историю диалога."
     )
@@ -44,8 +43,8 @@ def send_welcome(message):
 @bot.message_handler(commands=['reset'])
 def reset_memory(message):
     chat_id = message.chat.id
-    if chat_id in user_histories:
-        del user_histories[chat_id]
+    if chat_id in user_chats:
+        del user_chats[chat_id]
     bot.reply_to(message, "История диалога успешно сброшена.")
 
 @bot.message_handler(func=lambda message: True, content_types=['text'])
@@ -54,50 +53,46 @@ def handle_text(message):
     bot.send_chat_action(chat_id, 'typing')
 
     try:
-        # Инициализируем историю для нового чата системным промптом
-        if chat_id not in user_histories:
-            user_histories[chat_id] = [
+        if chat_id not in user_chats:
+            user_chats[chat_id] = [
                 {
                     "role": "system",
-                    "content": (
-                        "Ты вежливый, умный и полезный ассистент. "
-                        "Отвечай понятно, структурировано и по делу. "
-                        "Если нужно — используй списки и выделения."
-                    )
+                    "content": "Ты вежливый, умный и полезный ассистент. Отвечай понятно, структурировано и по делу."
                 }
             ]
 
-        # Добавляем сообщение пользователя в историю
-        user_histories[chat_id].append({"role": "user", "content": message.text})
+        user_chats[chat_id].append({
+            "role": "user",
+            "content": message.text
+        })
 
-        # Ограничиваем историю, чтобы не перегружать контекст (системный промпт + последние 10 сообщений)
-        if len(user_histories[chat_id]) > 11:
-            user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-10:]
-
-        # Запрос к Groq API
-        completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=user_histories[chat_id],
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=user_chats[chat_id],
             temperature=0.7,
-            max_tokens=2048,
+            max_tokens=2048
         )
 
-        bot_response = completion.choices[0].message.content
-        
-        # Добавляем ответ ассистента в историю
-        user_histories[chat_id].append({"role": "assistant", "content": bot_response})
+        answer = response.choices[0].message.content
 
-        # Разбиваем длинные ответы под лимиты Telegram
-        if len(bot_response) > 4000:
-            for i in range(0, len(bot_response), 4000):
-                bot.send_message(chat_id, bot_response[i:i + 4000])
+        user_chats[chat_id].append({
+            "role": "assistant",
+            "content": answer
+        })
+
+        # Ограничиваем историю
+        if len(user_chats[chat_id]) > 21:
+            user_chats[chat_id] = user_chats[chat_id][:1] + user_chats[chat_id][-20:]
+
+        if len(answer) > 4000:
+            for i in range(0, len(answer), 4000):
+                bot.send_message(chat_id, answer[i:i+4000])
         else:
-            bot.reply_to(message, bot_response, parse_mode='Markdown')
+            bot.reply_to(message, answer)
 
     except Exception as e:
-        error_text = str(e)
-        print(f"Ошибка Groq: {error_text}")
-        bot.reply_to(message, f"Произошла ошибка при обращении к ИИ:\n\n{error_text}")
+        print(f"Ошибка Groq: {e}")
+        bot.reply_to(message, f"Произошла ошибка:\n{e}")
 
 # ====================== ЗАПУСК ======================
 if __name__ == '__main__':
@@ -105,4 +100,4 @@ if __name__ == '__main__':
     flask_thread.start()
 
     print("Бот успешно запущен...")
-    bot.polling(none_stop=True, interval=1)
+    bot.polling(none_stop=True)

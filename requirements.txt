@@ -1,4 +1,3 @@
 pyTelegramBotAPI
 groq
 flask
-gunicorn
