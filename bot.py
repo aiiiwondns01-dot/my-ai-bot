@@ -70,9 +70,9 @@ def handle_text(message):
         if len(user_histories[chat_id]) > 11:
             user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-10:]
 
-        # Используем проверенную модель Groq
+        # Актуальная модель Groq
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
             messages=user_histories[chat_id],
             temperature=0.7,
             max_tokens=2048,
