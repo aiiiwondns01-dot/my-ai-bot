@@ -23,7 +23,7 @@ client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 user_histories = {}
-active_chat_ids = set()
+user_notebooks = {} # Простая память для ежедневника по чатам
 
 # ====================== FLASK (ДЛЯ RENDER) ======================
 app = Flask(__name__)
@@ -36,47 +36,102 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# ====================== СИСТЕМА НАПОМИНАНИЙ ======================
+# ====================== ФУНКЦИИ ИНСТРУМЕНТОВ (TOOLS) ======================
+
 def trigger_reminder(chat_id, text):
-    """Функция срабатывания напоминания по таймеру"""
+    """Срабатывание таймера напоминания"""
     try:
-        bot.send_message(
-            chat_id, 
-            f"⏰ **Напоминание:**\n{text}", 
-            parse_mode='Markdown'
-        )
+        bot.send_message(chat_id, f"Напоминание: {text}")
     except Exception as e:
-        print(f"Не удалось отправить напоминание чату {chat_id}: {e}")
+        print(f"Ошибка отправки напоминания: {e}")
 
-def set_reminder_function(chat_id, minutes, reminder_text):
-    """Инструмент, который вызывает нейросеть при запросе напоминания"""
+def set_reminder_function(chat_id, amount, unit, reminder_text):
+    """Универсальная установка напоминания (секунды, минуты, часы)"""
     try:
-        run_time = datetime.now() + timedelta(minutes=int(minutes))
+        amount = float(amount)
+        if unit in ["секунда", "секунды", "секунд", "sec", "seconds"]:
+            delta_seconds = amount
+        elif unit in ["час", "часа", "часов", "hour", "hours"]:
+            delta_seconds = amount * 3600
+        else:  # по умолчанию минуты
+            delta_seconds = amount * 60
+
+        run_time = datetime.now() + timedelta(seconds=delta_seconds)
         scheduler.add_job(trigger_reminder, 'date', run_date=run_time, args=[chat_id, reminder_text])
-        return f"Успешно установлено напоминание через {minutes} мин. Текст: '{reminder_text}'."
+        return f"Успешно напомню через {amount} {unit}: '{reminder_text}'."
     except Exception as e:
-        return f"Ошибка при установке напоминания: {e}"
+        return f"Не получилось поставить напоминание: {e}"
 
-# Описание функций (Tools) для Groq API
+def add_to_notebook_function(chat_id, task_text):
+    """Добавление дела в ежедневник"""
+    if chat_id not in user_notebooks:
+        user_notebooks[chat_id] = []
+    
+    user_notebooks[chat_id].append(task_text)
+    return f"Дело успешно записано в ежедневник: '{task_text}'."
+
+def show_notebook_function(chat_id):
+    """Показать список дел на сегодня"""
+    tasks = user_notebooks.get(chat_id, [])
+    if not tasks:
+        return "На сегодня в ежедневнике пока ничего нет."
+    
+    tasks_list = "\n".join([f"- {task}" for task in tasks])
+    return f"Твои дела на сегодня:\n{tasks_list}"
+
+# Описание инструментов для Groq API
 tools = [
     {
         "type": "function",
         "function": {
             "name": "set_reminder_function",
-            "description": "Установить напоминание для пользователя через определенное количество минут.",
+            "description": "Установить напоминание через определенное время (секунды, минуты или часы).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "minutes": {
-                        "type": "integer",
-                        "description": "Через сколько минут нужно напомнить (например, 10, 30, 60)."
+                    "amount": {
+                        "type": "number",
+                        "description": "Числовое значение времени (например, 15, 0.5, 2)."
+                    },
+                    "unit": {
+                        "type": "string",
+                        "description": "Единица измерения времени: секунды, минуты или часы.",
+                        "enum": ["секунды", "минуты", "часы"]
                     },
                     "reminder_text": {
                         "type": "string",
-                        "description": "Текст или суть напоминания."
+                        "description": "Суть напоминания."
                     }
                 },
-                "required": ["minutes", "reminder_text"]
+                "required": ["amount", "unit", "reminder_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_to_notebook_function",
+            "description": "Записать важное дело или задачу в ежедневник.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_text": {
+                        "type": "string",
+                        "description": "Краткая суть дела или задачи."
+                    }
+                },
+                "required": ["task_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_notebook_function",
+            "description": "Показать список всех записанных дел на сегодня.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
             }
         }
     }
@@ -85,20 +140,24 @@ tools = [
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-# ====================== ЛОГИКА ОБРАБОТКИ ИИ С TOOLS ======================
+# ====================== ЛОГИКА ИИ ======================
+SYSTEM_PROMPT = (
+    "Твое имя — Воскресенье. Ты общаешься с пользователем как друг-тинейджер: на «ты», просто, легко, "
+    "без токсичного сленга и без лишней официальщины.\n"
+    "Информация о пользователе, которую ты всегда помнишь: его зовут Вова, ему 21 год, он студент университета, "
+    "активно учится новым штукам. У него есть опыт работы с VFX на Unreal Engine 5, он изучает Houdini, "
+    "планирует серьезно развиваться в направлении 3D и геймдева.\n"
+    "Самое главное правило: НИКОГДА и ни при каких условиях не используй символы форматирования текста "
+    "вроде двойных звездочек (**), одинарных (*), подчеркиваний (_) или решеток (#). Текст должен быть абсолютно простым, "
+    "чистым, без выделений.\n"
+    "Пиши всегда максимально коротко, четко и по делу, без «воды»."
+)
+
 def process_ai_response(chat_id, user_text, message_to_reply):
     try:
-        active_chat_ids.add(chat_id)
-        
         if chat_id not in user_histories:
             user_histories[chat_id] = [
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты вежливый, умный и полезный ассистент. "
-                        "Если пользователь просит о чем-то напомнить, обязательно используй функцию set_reminder_function."
-                    )
-                }
+                {"role": "system", "content": SYSTEM_PROMPT}
             ]
 
         user_histories[chat_id].append({"role": "user", "content": user_text})
@@ -106,7 +165,6 @@ def process_ai_response(chat_id, user_text, message_to_reply):
         if len(user_histories[chat_id]) > 31:
             user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-30:]
 
-        # Основная текстовая модель с поддержкой инструментов
         response = client.chat.completions.create(
             model="openai/gpt-oss-120b",
             messages=user_histories[chat_id],
@@ -122,19 +180,23 @@ def process_ai_response(chat_id, user_text, message_to_reply):
             user_histories[chat_id].append(response_message)
             
             for tool_call in response_message.tool_calls:
-                if tool_call.function.name == "set_reminder_function":
-                    args = json.loads(tool_call.function.arguments)
-                    mins = args.get("minutes")
-                    text = args.get("reminder_text")
-                    
-                    tool_result = set_reminder_function(chat_id, mins, text)
-                    
-                    user_histories[chat_id].append({
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": "set_reminder_function",
-                        "content": tool_result
-                    })
+                args = json.loads(tool_call.function.arguments)
+                name = tool_call.function.name
+                
+                tool_result = ""
+                if name == "set_reminder_function":
+                    tool_result = set_reminder_function(chat_id, args.get("amount"), args.get("unit"), args.get("reminder_text"))
+                elif name == "add_to_notebook_function":
+                    tool_result = add_to_notebook_function(chat_id, args.get("task_text"))
+                elif name == "show_notebook_function":
+                    tool_result = show_notebook_function(chat_id)
+                
+                user_histories[chat_id].append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "name": name,
+                    "content": tool_result
+                })
 
             second_response = client.chat.completions.create(
                 model="openai/gpt-oss-120b",
@@ -144,7 +206,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
             )
             bot_response = second_response.choices[0].message.content
             user_histories[chat_id].append({"role": "assistant", "content": bot_response})
-            bot.reply_to(message_to_reply, bot_response, parse_mode='Markdown')
+            bot.reply_to(message_to_reply, bot_response)
 
         else:
             bot_response = response_message.content
@@ -154,24 +216,20 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                 for i in range(0, len(bot_response), 4000):
                     bot.send_message(chat_id, bot_response[i:i + 4000])
             else:
-                bot.reply_to(message_to_reply, bot_response, parse_mode='Markdown')
+                bot.reply_to(message_to_reply, bot_response)
 
     except Exception as e:
         error_text = str(e)
-        print(f"Ошибка Groq: {error_text}")
-        bot.reply_to(message_to_reply, f"Произошла ошибка при обращении к ИИ:\n\n{error_text}")
+        print(f"Ошибка ИИ: {error_text}")
+        bot.reply_to(message_to_reply, f"Трабл с ИИ: {error_text}")
 
 # ====================== ОБРАБОТЧИКИ TELEGRAM ======================
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    active_chat_ids.add(message.chat.id)
     bot.reply_to(
         message,
-        "Привет! Я твой продвинутый ИИ-ассистент.\n"
-        "• Понимаю текст, голосовые и **кружочки**.\n"
-        "• Анализирую **изображения**.\n"
-        "• Умею ставить напоминания через голосовые или текст (просто скажи: *«напомни через 10 минут...»*).\n\n"
-        "Команда /reset — сбросить историю диалога."
+        "Здарова, Вова! Я Воскресенье, твой бро-ассистент. Помню, что ты студент, шаришь за VFX в UE5, копаешь Гудини и метишь в 3D с геймдевом. "
+        "Могу записывать дела в ежедневник, ставить напоминания на любое время, слушать голосовухи и кружочки, а также смотреть картинки. Че делаем?"
     )
 
 @bot.message_handler(commands=['reset'])
@@ -179,7 +237,7 @@ def reset_memory(message):
     chat_id = message.chat.id
     if chat_id in user_histories:
         del user_histories[chat_id]
-    bot.reply_to(message, "История диалога успешно сброшена.")
+    bot.reply_to(message, "Память диалога сброшена, но основная инфа про тебя осталась при мне.")
 
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_text(message):
@@ -205,15 +263,14 @@ def handle_voice(message):
 
         user_text = transcription.strip() if isinstance(transcription, str) else transcription.text
         if not user_text:
-            bot.reply_to(message, "Не удалось разобрать голосовое сообщение.")
+            bot.reply_to(message, "Не вышло разобрать голосовуху.")
             return
 
-        bot.send_message(chat_id, f"🎙️ *Распознано:* {user_text}", parse_mode='Markdown')
         process_ai_response(chat_id, user_text, message)
 
     except Exception as e:
-        print(f"Ошибка голоса: {e}")
-        bot.reply_to(message, f"Не удалось обработать голосовое:\n{e}")
+        print(f"Ошибка голосового: {e}")
+        bot.reply_to(message, f"Ошибка с голосом: {e}")
 
 @bot.message_handler(content_types=['video_note'])
 def handle_video_note(message):
@@ -233,15 +290,14 @@ def handle_video_note(message):
 
         user_text = transcription.strip() if isinstance(transcription, str) else transcription.text
         if not user_text:
-            bot.reply_to(message, "Не удалось разобрать кружочек.")
+            bot.reply_to(message, "Не вышло разобрать кружочек.")
             return
 
-        bot.send_message(chat_id, f"🎥 *Распознано из кружочка:* {user_text}", parse_mode='Markdown')
         process_ai_response(chat_id, user_text, message)
 
     except Exception as e:
         print(f"Ошибка кружочка: {e}")
-        bot.reply_to(message, f"Не удалось обработать видеосообщение:\n{e}")
+        bot.reply_to(message, f"Ошибка с кружочком: {e}")
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
@@ -253,10 +309,10 @@ def handle_photo(message):
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
 
-        caption = message.caption or "Опиши эту картинку."
+        caption = message.caption or "Опиши картинку."
 
         if chat_id not in user_histories:
-            user_histories[chat_id] = [{"role": "system", "content": "Ты полезный ассистент."}]
+            user_histories[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
         messages_payload = user_histories[chat_id].copy()
         messages_payload.append({
@@ -267,7 +323,6 @@ def handle_photo(message):
             ]
         })
 
-        # Мультимодальная модель для работы с изображениями
         completion = client.chat.completions.create(
             model="qwen/qwen3.6-27b",
             messages=messages_payload,
@@ -276,7 +331,7 @@ def handle_photo(message):
         )
 
         bot_response = completion.choices[0].message.content
-        user_histories[chat_id].append({"role": "user", "content": f"[Фото с подписью: {caption}]"})
+        user_histories[chat_id].append({"role": "user", "content": f"[Фото: {caption}]"})
         user_histories[chat_id].append({"role": "assistant", "content": bot_response})
 
         if len(user_histories[chat_id]) > 31:
@@ -286,16 +341,16 @@ def handle_photo(message):
             for i in range(0, len(bot_response), 4000):
                 bot.send_message(chat_id, bot_response[i:i + 4000])
         else:
-            bot.reply_to(message, bot_response, parse_mode='Markdown')
+            bot.reply_to(message, bot_response)
 
     except Exception as e:
-        print(f"Ошибка изображения: {e}")
-        bot.reply_to(message, f"Не удалось обработать изображение:\n{e}")
+        print(f"Ошибка картинки: {e}")
+        bot.reply_to(message, f"Ошибка с картинкой: {e}")
 
 # ====================== ЗАПУСК ======================
 if __name__ == '__main__':
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    print("Бот успешно запущен...")
+    print("Воскресенье успешно запущен...")
     bot.polling(none_stop=True, interval=1)
