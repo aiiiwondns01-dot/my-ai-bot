@@ -18,19 +18,17 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN не найден в переменных окружения!")
-
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY не найден в переменных окружения!")
 
 # ====================== ИНИЦИАЛИЗАЦИЯ ======================
 client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
 user_histories = {}
 user_notebooks = {} 
 
 # ====================== FLASK (ДЛЯ RENDER) ======================
-app = Flask(__name__)
+app = Flask(name)
 
 @app.route('/')
 def home():
@@ -41,7 +39,6 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # ====================== ИНСТРУМЕНТЫ (TOOLS) ======================
-
 def trigger_reminder(chat_id, text):
     try:
         bot.send_message(chat_id, f"Напоминание: {text}")
@@ -57,7 +54,6 @@ def set_reminder(chat_id, amount, unit, reminder_text):
             delta_seconds = amount * 3600
         else: 
             delta_seconds = amount * 60
-
         run_time = datetime.now() + timedelta(seconds=delta_seconds)
         scheduler.add_job(trigger_reminder, 'date', run_date=run_time, args=[chat_id, reminder_text])
         return f"Успешно напомню через {amount} {unit}: '{reminder_text}'."
@@ -114,7 +110,6 @@ def fetch_web_page(url):
         return text[:10000]
     except Exception as e:
         return f"Не удалось прочитать сайт: {e}"
-
 tools = [
     {
         "type": "function",
@@ -190,10 +185,20 @@ SYSTEM_PROMPT = (
     "СТРОГИЕ ПРАВИЛА ВЫВОДА:\n"
     "1. Никогда не пиши мысли, теги think, рассуждения или внутренний анализ. Выдавай сразу и только готовый ответ пользователю.\n"
     "2. НИКОГДА и ни при каких условиях не используй символы форматирования текста вроде двойных звездочек (**), одинарных (*), подчеркиваний (_) или решеток (#). Текст должен быть абсолютно простым, чистым, без выделений.\n"
-    "3. Пиши всегда максимально коротко, четко и по делу, без «воды»."
+    "3. Пиши всегда максимально коротко, четко и по делу, без «воды».\n"
+    "4. НЕ ИСПОЛЬЗУЙ теги <think> и не показывай свои мыслительные процессы."
 )
 
-def process_ai_response(chat_id, user_text, message_to_reply):
+def remove_think_tags(text):
+    """Удаляет теги <think> и их содержимое"""
+    import re
+    # Удаляем все что внутри <think>...</think>
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # Удаляем пустые строки
+    text = '\n'.join(line for line in text.splitlines() if line.strip())
+    return text.strip()
+
+def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True):
     try:
         if chat_id not in user_histories:
             user_histories[chat_id] = [
@@ -201,22 +206,33 @@ def process_ai_response(chat_id, user_text, message_to_reply):
             ]
 
         user_histories[chat_id].append({"role": "user", "content": user_text})
-
-        if len(user_histories[chat_id]) > 31:
+if len(user_histories[chat_id]) > 31:
             user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-30:]
 
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=user_histories[chat_id],
-            tools=tools,
-            tool_choice="auto",
-            temperature=0.7,
-            max_tokens=2048,
-        )
+        # Создаем запрос с инструментами только если они нужны
+        messages = user_histories[chat_id]
+        
+        if use_tools:
+            response = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                temperature=0.7,
+                max_tokens=2048,
+            )
+        else:
+            response = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=messages,
+                temperature=0.7,
+                max_tokens=2048,
+            )
 
         response_message = response.choices[0].message
-
-        if response_message.tool_calls:
+        
+        # Обработка ответа
+        if use_tools and response_message.tool_calls:
             user_histories[chat_id].append(response_message)
             
             for tool_call in response_message.tool_calls:
@@ -242,7 +258,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                     "name": name,
                     "content": tool_result
                 })
-
+            
             second_response = client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=user_histories[chat_id],
@@ -250,18 +266,20 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                 max_tokens=2048,
             )
             bot_response = second_response.choices[0].message.content
-            user_histories[chat_id].append({"role": "assistant", "content": bot_response})
-            bot.reply_to(message_to_reply, bot_response)
-
         else:
             bot_response = response_message.content
-            user_histories[chat_id].append({"role": "assistant", "content": bot_response})
 
-            if len(bot_response) > 4000:
-                for i in range(0, len(bot_response), 4000):
-                    bot.send_message(chat_id, bot_response[i:i + 4000])
-            else:
-                bot.reply_to(message_to_reply, bot_response)
+        # Очищаем ответ от think тегов
+        bot_response = remove_think_tags(bot_response)
+        
+        user_histories[chat_id].append({"role": "assistant", "content": bot_response})
+
+        # Отправляем ответ
+        if len(bot_response) > 4000:
+            for i in range(0, len(bot_response), 4000):
+                bot.send_message(chat_id, bot_response[i:i + 4000])
+        else:
+            bot.reply_to(message_to_reply, bot_response)
 
     except Exception as e:
         error_text = str(e)
@@ -288,122 +306,14 @@ def reset_memory(message):
 def handle_text(message):
     chat_id = message.chat.id
     text = message.text
-    
-    if "http://" in text or "https://" in text:
-        words = text.split()
-        url = next((w for w in words if w.startswith("http://") or w.startswith("https://")), None)
-        if url:
-            bot.send_chat_action(chat_id, 'typing')
-            page_content = fetch_web_page(url)
-            prompt_with_page = f"Пользователь скинул ссылку {url} с текстом: '{text}'. Вот содержимое страницы:\n{page_content}\nВыдели самую суть простым текстом без форматирования и без блоков размышлений."
-            process_ai_response(chat_id, prompt_with_page, message)
-            return
-
-    bot.send_chat_action(chat_id, 'typing')
-    process_ai_response(chat_id, text, message)
-
-@bot.message_handler(content_types=['voice', 'audio'])
-def handle_voice(message):
-    chat_id = message.chat.id
-    bot.send_chat_action(chat_id, 'typing')
-
-    try:
-        file_info = bot.get_file(message.voice.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-
-        transcription = client.audio.transcriptions.create(
-            file=("voice.ogg", downloaded_file),
-            model="whisper-large-v3",
-            prompt="Распознай русскую речь",
-            response_format="text"
-        )
-
-        user_text = transcription.strip() if isinstance(transcription, str) else transcription.text
-        if not user_text:
-            bot.reply_to(message, "Не вышло разобрать голосовуху.")
-            return
-
-        process_ai_response(chat_id, user_text, message)
-
-    except Exception as e:
-        print(f"Ошибка голосового: {e}")
-        bot.reply_to(message, f"Ошибка с голосом: {e}")
-
-@bot.message_handler(content_types=['video_note'])
-def handle_video_note(message):
-    chat_id = message.chat.id
-    bot.send_chat_action(chat_id, 'typing')
-
-    try:
-        file_info = bot.get_file(message.video_note.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-
-        transcription = client.audio.transcriptions.create(
-            file=("videonote.mp4", downloaded_file),
-            model="whisper-large-v3",
-            prompt="Распознай русскую речь",
-            response_format="text"
-        )
-
-        user_text = transcription.strip() if isinstance(transcription, str) else transcription.text
-        if not user_text:
-            bot.reply_to(message, "Не вышло разобрать кружочек.")
-            return
-
-        process_ai_response(chat_id, user_text, message)
-
-    except Exception as e:
-        print(f"Ошибка кружочка: {e}")
-        bot.reply_to(message, f"Ошибка с кружочком: {e}")
-
-@bot.message_handler(content_types=['document'])
-def handle_document(message):
-    chat_id = message.chat.id
-    bot.send_chat_action(chat_id, 'typing')
-
-    try:
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        file_name = message.document.file_name.lower()
-
-        extracted_text = ""
-        temp_path = f"temp_{message.document.file_name}"
-        with open(temp_path, 'wb') as f:
-            f.write(downloaded_file)
-
-        if file_name.endswith('.pdf'):
-            reader = PdfReader(temp_path)
-            for page in reader.pages:
-                extracted_text += page.extract_text() or ""
-        elif file_name.endswith('.docx'):
-            doc = docx.Document(temp_path)
-            for para in doc.paragraphs:
-                extracted_text += para.text + "\n"
-
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
-        if not extracted_text.strip():
-            bot.reply_to(message, "Не удалось прочитать текст из файла.")
-            return
-
-        prompt_text = f"Пользователь прикрепил документ {message.document.file_name}. Вот его текст:\n{extracted_text[:10000]}\nВыдай самую суть простым текстом без форматирования и без рассуждений."
-        process_ai_response(chat_id, prompt_text, message)
-
-    except Exception as e:
-        print(f"Ошибка файла: {e}")
-        bot.reply_to(message, f"Не удалось обработать файл: {e}")
-
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     chat_id = message.chat.id
     bot.send_chat_action(chat_id, 'upload_photo')
-
     try:
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
-
         caption = message.caption or "Опиши подробно, что видишь на фото, без лишних мыслей, без тегов think и без форматирования."
 
         if chat_id not in user_histories:
@@ -418,14 +328,18 @@ def handle_photo(message):
             ]
         })
 
+        # Для фото НЕ используем инструменты
         completion = client.chat.completions.create(
             model="qwen/qwen3.6-27b",
             messages=messages_payload,
             temperature=0.7,
             max_tokens=2048,
         )
-
+        
         bot_response = completion.choices[0].message.content
+        # Очищаем от think тегов
+        bot_response = remove_think_tags(bot_response)
+        
         user_histories[chat_id].append({"role": "user", "content": f"[Фото: {caption}]"})
         user_histories[chat_id].append({"role": "assistant", "content": bot_response})
 
@@ -443,9 +357,8 @@ def handle_photo(message):
         bot.reply_to(message, f"Не удалось обработать изображение: {e}")
 
 # ====================== ЗАПУСК ======================
-if __name__ == '__main__':
+if name == 'main':
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
     print("Воскресенье успешно запущен...")
     bot.polling(none_stop=True, interval=1)
