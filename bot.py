@@ -43,14 +43,12 @@ def run_flask():
 # ====================== ИНСТРУМЕНТЫ (TOOLS) ======================
 
 def trigger_reminder(chat_id, text):
-    """Срабатывание таймера напоминания"""
     try:
         bot.send_message(chat_id, f"Напоминание: {text}")
     except Exception as e:
         print(f"Ошибка отправки напоминания: {e}")
 
 def set_reminder_function(chat_id, amount, unit, reminder_text):
-    """Установка напоминания (секунды, минуты, часы)"""
     try:
         amount = float(amount)
         if unit in ["секунда", "секунды", "секунд", "sec", "seconds"]:
@@ -67,24 +65,19 @@ def set_reminder_function(chat_id, amount, unit, reminder_text):
         return f"Не получилось поставить напоминание: {e}"
 
 def add_to_notebook_function(chat_id, task_text):
-    """Добавление дела в ежедневник"""
     if chat_id not in user_notebooks:
         user_notebooks[chat_id] = []
-    
     user_notebooks[chat_id].append(task_text)
     return f"Дело успешно записано в ежедневник: '{task_text}'."
 
 def show_notebook_function(chat_id):
-    """Показать список дел на сегодня"""
     tasks = user_notebooks.get(chat_id, [])
     if not tasks:
         return "На сегодня в ежедневнике пока ничего нет."
-    
     tasks_list = "\n".join([f"- {task}" for task in tasks])
     return f"Твои дела на сегодня:\n{tasks_list}"
 
 def get_weather_function(city="Саратов"):
-    """Получить погоду"""
     try:
         url = f"https://wttr.in/{city}?format=3&lang=ru"
         response = requests.get(url, timeout=5)
@@ -95,41 +88,33 @@ def get_weather_function(city="Саратов"):
         return f"Ошибка получения погоды: {e}"
 
 def get_news_function():
-    """Получить свежие новости"""
     try:
         url = "https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru"
         response = requests.get(url, timeout=5)
         if response.status_code != 200:
             return "Не удалось загрузить новости."
-        
         soup = BeautifulSoup(response.content, features='xml')
         items = soup.findAll('item')[:5]
-        news_list = []
-        for item in items:
-            news_list.append(f"- {item.title.text}")
+        news_list = [f"- {item.title.text}" for item in items]
         return "\n".join(news_list)
     except Exception as e:
         return f"Ошибка загрузки новостей: {e}"
 
 def fetch_web_page(url):
-    """Чтение текста с веб-сайта по ссылке"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
-        
         for script in soup(["script", "style"]):
             script.extract()
-            
         text = soup.get_text()
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = '\n'.join(chunk for chunk in chunks if chunk)
-        return text[:10000] # Ограничение для контекста
+        return text[:10000]
     except Exception as e:
         return f"Не удалось прочитать сайт: {e}"
 
-# Описание инструментов для Groq API
 tools = [
     {
         "type": "function",
@@ -202,10 +187,10 @@ SYSTEM_PROMPT = (
     "Информация о пользователе: его зовут Вова, ему 21 год, он студент университета, живет в Саратове, Саратовской области. "
     "У него есть опыт работы с VFX на Unreal Engine 5, он изучает Houdini, планирует развиваться в 3D и геймдеве.\n"
     "У тебя есть инструменты для погоды, новостей, ежедневника и напоминаний, а также возможность читать сайты по ссылкам.\n"
-    "Самое главное правило: НИКОГДА и ни при каких условиях не используй символы форматирования текста "
-    "вроде двойных звездочек (**), одинарных (*), подчеркиваний (_) или решеток (#). Текст должен быть абсолютно простым, "
-    "чистым, без выделений.\n"
-    "Пиши всегда максимально коротко, четко и по делу, без «воды»."
+    "СТРОГИЕ ПРАВИЛА ВЫВОДА:\n"
+    "1. Никогда не пиши мысли, теги think, рассуждения или внутренний анализ. Выдавай сразу и только готовый ответ пользователю.\n"
+    "2. НИКОГДА и ни при каких условиях не используй символы форматирования текста вроде двойных звездочек (**), одинарных (*), подчеркиваний (_) или решеток (#). Текст должен быть абсолютно простым, чистым, без выделений.\n"
+    "3. Пиши всегда максимально коротко, четко и по делу, без «воды»."
 )
 
 def process_ai_response(chat_id, user_text, message_to_reply):
@@ -288,7 +273,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
 def send_welcome(message):
     bot.reply_to(
         message,
-        "Здарова, Вова! Я Воскресенье, твой бро-ассистент. Помню, что ты из Саратова, студент, шаришь за VFX в UE5, копаешь Гудини и метишь в 3D. "
+        "Здарова, Вова! Я Воскресенье, твой бро-ассистент. Помню про Саратов, учебу, VFX и 3D. "
         "Могу давать погоду, новости, читать сайты, файлы и видео по ссылкам, вести ежедневник и ставить напоминания. Че делаем?"
     )
 
@@ -304,14 +289,13 @@ def handle_text(message):
     chat_id = message.chat.id
     text = message.text
     
-    # Проверка на наличие ссылки в тексте для парсинга сайта
     if "http://" in text or "https://" in text:
         words = text.split()
         url = next((w for w in words if w.startswith("http://") or w.startswith("https://")), None)
         if url:
             bot.send_chat_action(chat_id, 'typing')
             page_content = fetch_web_page(url)
-            prompt_with_page = f"Пользователь скинул ссылку {url} с текстом: '{text}'. Вот содержимое страницы:\n{page_content}\nВыдели самую суть простым текстом без форматирования."
+            prompt_with_page = f"Пользователь скинул ссылку {url} с текстом: '{text}'. Вот содержимое страницы:\n{page_content}\nВыдели самую суть простым текстом без форматирования и без блоков размышлений."
             process_ai_response(chat_id, prompt_with_page, message)
             return
 
@@ -403,7 +387,7 @@ def handle_document(message):
             bot.reply_to(message, "Не удалось прочитать текст из файла.")
             return
 
-        prompt_text = f"Пользователь прикрепил документ {message.document.file_name}. Вот его текст:\n{extracted_text[:10000]}\nВыдай самую суть простым текстом без форматирования."
+        prompt_text = f"Пользователь прикрепил документ {message.document.file_name}. Вот его текст:\n{extracted_text[:10000]}\nВыдай самую суть простым текстом без форматирования и без рассуждений."
         process_ai_response(chat_id, prompt_text, message)
 
     except Exception as e:
@@ -420,7 +404,7 @@ def handle_photo(message):
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
 
-        caption = message.caption or "Опиши подробно, что видишь на фото."
+        caption = message.caption or "Опиши подробно, что видишь на фото, без лишних мыслей и рассуждений."
 
         if chat_id not in user_histories:
             user_histories[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
