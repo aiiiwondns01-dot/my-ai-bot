@@ -7,6 +7,10 @@ from flask import Flask
 import telebot
 from groq import Groq
 from apscheduler.schedulers.background import BackgroundScheduler
+import requests
+from bs4 import BeautifulSoup
+from pypdf import PdfReader
+import docx
 
 # ====================== КЛЮЧИ ======================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -23,7 +27,7 @@ client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 user_histories = {}
-user_notebooks = {} # Простая память для ежедневника по чатам
+user_notebooks = {} 
 
 # ====================== FLASK (ДЛЯ RENDER) ======================
 app = Flask(__name__)
@@ -36,7 +40,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# ====================== ФУНКЦИИ ИНСТРУМЕНТОВ (TOOLS) ======================
+# ====================== ИНСТРУМЕНТЫ (TOOLS) ======================
 
 def trigger_reminder(chat_id, text):
     """Срабатывание таймера напоминания"""
@@ -46,14 +50,14 @@ def trigger_reminder(chat_id, text):
         print(f"Ошибка отправки напоминания: {e}")
 
 def set_reminder_function(chat_id, amount, unit, reminder_text):
-    """Универсальная установка напоминания (секунды, минуты, часы)"""
+    """Установка напоминания (секунды, минуты, часы)"""
     try:
         amount = float(amount)
         if unit in ["секунда", "секунды", "секунд", "sec", "seconds"]:
             delta_seconds = amount
         elif unit in ["час", "часа", "часов", "hour", "hours"]:
             delta_seconds = amount * 3600
-        else:  # по умолчанию минуты
+        else: 
             delta_seconds = amount * 60
 
         run_time = datetime.now() + timedelta(seconds=delta_seconds)
@@ -79,6 +83,52 @@ def show_notebook_function(chat_id):
     tasks_list = "\n".join([f"- {task}" for task in tasks])
     return f"Твои дела на сегодня:\n{tasks_list}"
 
+def get_weather_function(city="Саратов"):
+    """Получить погоду"""
+    try:
+        url = f"https://wttr.in/{city}?format=3&lang=ru"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return response.text.strip()
+        return "Не удалось получить погоду."
+    except Exception as e:
+        return f"Ошибка получения погоды: {e}"
+
+def get_news_function():
+    """Получить свежие новости"""
+    try:
+        url = "https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru"
+        response = requests.get(url, timeout=5)
+        if response.status_code != 200:
+            return "Не удалось загрузить новости."
+        
+        soup = BeautifulSoup(response.content, features='xml')
+        items = soup.findAll('item')[:5]
+        news_list = []
+        for item in items:
+            news_list.append(f"- {item.title.text}")
+        return "\n".join(news_list)
+    except Exception as e:
+        return f"Ошибка загрузки новостей: {e}"
+
+def fetch_web_page(url):
+    """Чтение текста с веб-сайта по ссылке"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        for script in soup(["script", "style"]):
+            script.extract()
+            
+        text = soup.get_text()
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = '\n'.join(chunk for chunk in chunks if chunk)
+        return text[:10000] # Ограничение для контекста
+    except Exception as e:
+        return f"Не удалось прочитать сайт: {e}"
+
 # Описание инструментов для Groq API
 tools = [
     {
@@ -89,19 +139,9 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "amount": {
-                        "type": "number",
-                        "description": "Числовое значение времени (например, 15, 0.5, 2)."
-                    },
-                    "unit": {
-                        "type": "string",
-                        "description": "Единица измерения времени: секунды, минуты или часы.",
-                        "enum": ["секунды", "минуты", "часы"]
-                    },
-                    "reminder_text": {
-                        "type": "string",
-                        "description": "Суть напоминания."
-                    }
+                    "amount": {"type": "number", "description": "Числовое значение времени."},
+                    "unit": {"type": "string", "description": "Единица измерения времени.", "enum": ["секунды", "минуты", "часы"]},
+                    "reminder_text": {"type": "string", "description": "Суть напоминания."}
                 },
                 "required": ["amount", "unit", "reminder_text"]
             }
@@ -115,10 +155,7 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task_text": {
-                        "type": "string",
-                        "description": "Краткая суть дела или задачи."
-                    }
+                    "task_text": {"type": "string", "description": "Краткая суть дела или задачи."}
                 },
                 "required": ["task_text"]
             }
@@ -129,10 +166,28 @@ tools = [
         "function": {
             "name": "show_notebook_function",
             "description": "Показать список всех записанных дел на сегодня.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather_function",
+            "description": "Узнать актуальную погоду в Саратове или другом городе.",
             "parameters": {
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "city": {"type": "string", "description": "Название города, по умолчанию Саратов."}
+                }
             }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_news_function",
+            "description": "Получить актуальные новости на сегодня.",
+            "parameters": {"type": "object", "properties": {}}
         }
     }
 ]
@@ -144,9 +199,9 @@ scheduler.start()
 SYSTEM_PROMPT = (
     "Твое имя — Воскресенье. Ты общаешься с пользователем как друг-тинейджер: на «ты», просто, легко, "
     "без токсичного сленга и без лишней официальщины.\n"
-    "Информация о пользователе, которую ты всегда помнишь: его зовут Вова, ему 21 год, он студент университета, "
-    "активно учится новым штукам. У него есть опыт работы с VFX на Unreal Engine 5, он изучает Houdini, "
-    "планирует серьезно развиваться в направлении 3D и геймдева.\n"
+    "Информация о пользователе: его зовут Вова, ему 21 год, он студент университета, живет в Саратове, Саратовской области. "
+    "У него есть опыт работы с VFX на Unreal Engine 5, он изучает Houdini, планирует развиваться в 3D и геймдеве.\n"
+    "У тебя есть инструменты для погоды, новостей, ежедневника и напоминаний, а также возможность читать сайты по ссылкам.\n"
     "Самое главное правило: НИКОГДА и ни при каких условиях не используй символы форматирования текста "
     "вроде двойных звездочек (**), одинарных (*), подчеркиваний (_) или решеток (#). Текст должен быть абсолютно простым, "
     "чистым, без выделений.\n"
@@ -180,7 +235,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
             user_histories[chat_id].append(response_message)
             
             for tool_call in response_message.tool_calls:
-                args = json.loads(tool_call.function.arguments)
+                args = json.loads(tool_call.function.arguments or "{}")
                 name = tool_call.function.name
                 
                 tool_result = ""
@@ -190,6 +245,11 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                     tool_result = add_to_notebook_function(chat_id, args.get("task_text"))
                 elif name == "show_notebook_function":
                     tool_result = show_notebook_function(chat_id)
+                elif name == "get_weather_function":
+                    city = args.get("city", "Саратов")
+                    tool_result = get_weather_function(city)
+                elif name == "get_news_function":
+                    tool_result = get_news_function()
                 
                 user_histories[chat_id].append({
                     "tool_call_id": tool_call.id,
@@ -228,8 +288,8 @@ def process_ai_response(chat_id, user_text, message_to_reply):
 def send_welcome(message):
     bot.reply_to(
         message,
-        "Здарова, твой бот Воскресенье "
-        "Че делаем?"
+        "Здарова, Вова! Я Воскресенье, твой бро-ассистент. Помню, что ты из Саратова, студент, шаришь за VFX в UE5, копаешь Гудини и метишь в 3D. "
+        "Могу давать погоду, новости, читать сайты, файлы и видео по ссылкам, вести ежедневник и ставить напоминания. Че делаем?"
     )
 
 @bot.message_handler(commands=['reset'])
@@ -237,13 +297,26 @@ def reset_memory(message):
     chat_id = message.chat.id
     if chat_id in user_histories:
         del user_histories[chat_id]
-    bot.reply_to(message, "Память диалога сброшена, но основная инфа осталась при мне.")
+    bot.reply_to(message, "Память диалога сброшена, но основная инфа про тебя и Саратов при мне.")
 
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_text(message):
     chat_id = message.chat.id
+    text = message.text
+    
+    # Проверка на наличие ссылки в тексте для парсинга сайта
+    if "http://" in text or "https://" in text:
+        words = text.split()
+        url = next((w for w in words if w.startswith("http://") or w.startswith("https://")), None)
+        if url:
+            bot.send_chat_action(chat_id, 'typing')
+            page_content = fetch_web_page(url)
+            prompt_with_page = f"Пользователь скинул ссылку {url} с текстом: '{text}'. Вот содержимое страницы:\n{page_content}\nВыдели самую суть простым текстом без форматирования."
+            process_ai_response(chat_id, prompt_with_page, message)
+            return
+
     bot.send_chat_action(chat_id, 'typing')
-    process_ai_response(chat_id, message.text, message)
+    process_ai_response(chat_id, text, message)
 
 @bot.message_handler(content_types=['voice', 'audio'])
 def handle_voice(message):
@@ -299,6 +372,44 @@ def handle_video_note(message):
         print(f"Ошибка кружочка: {e}")
         bot.reply_to(message, f"Ошибка с кружочком: {e}")
 
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    chat_id = message.chat.id
+    bot.send_chat_action(chat_id, 'typing')
+
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        file_name = message.document.file_name.lower()
+
+        extracted_text = ""
+        temp_path = f"temp_{message.document.file_name}"
+        with open(temp_path, 'wb') as f:
+            f.write(downloaded_file)
+
+        if file_name.endswith('.pdf'):
+            reader = PdfReader(temp_path)
+            for page in reader.pages:
+                extracted_text += page.extract_text() or ""
+        elif file_name.endswith('.docx'):
+            doc = docx.Document(temp_path)
+            for para in doc.paragraphs:
+                extracted_text += para.text + "\n"
+
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        if not extracted_text.strip():
+            bot.reply_to(message, "Не удалось прочитать текст из файла.")
+            return
+
+        prompt_text = f"Пользователь прикрепил документ {message.document.file_name}. Вот его текст:\n{extracted_text[:10000]}\nВыдай самую суть простым текстом без форматирования."
+        process_ai_response(chat_id, prompt_text, message)
+
+    except Exception as e:
+        print(f"Ошибка файла: {e}")
+        bot.reply_to(message, f"Не удалось обработать файл: {e}")
+
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     chat_id = message.chat.id
@@ -309,7 +420,7 @@ def handle_photo(message):
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
 
-        caption = message.caption or "Опиши картинку."
+        caption = message.caption or "Опиши подробно, что видишь на фото."
 
         if chat_id not in user_histories:
             user_histories[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -345,7 +456,7 @@ def handle_photo(message):
 
     except Exception as e:
         print(f"Ошибка картинки: {e}")
-        bot.reply_to(message, f"Ошибка с картинкой: {e}")
+        bot.reply_to(message, f"Не удалось обработать изображение: {e}")
 
 # ====================== ЗАПУСК ======================
 if __name__ == '__main__':
