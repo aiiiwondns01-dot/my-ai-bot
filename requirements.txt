@@ -3,3 +3,7 @@ groq
 flask
 gunicorn
 apscheduler
+requests
+beautifulsoup4
+pypdf
+python-docx
