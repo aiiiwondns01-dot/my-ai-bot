@@ -228,8 +228,8 @@ def process_ai_response(chat_id, user_text, message_to_reply):
 def send_welcome(message):
     bot.reply_to(
         message,
-        "Здарова, Вова! Я Воскресенье, твой бро-ассистент. Помню, что ты студент, шаришь за VFX в UE5, копаешь Гудини и метишь в 3D с геймдевом. "
-        "Могу записывать дела в ежедневник, ставить напоминания на любое время, слушать голосовухи и кружочки, а также смотреть картинки. Че делаем?"
+        "Здарова, твой бот Воскресенье "
+        "Че делаем?"
     )
 
 @bot.message_handler(commands=['reset'])
@@ -237,7 +237,7 @@ def reset_memory(message):
     chat_id = message.chat.id
     if chat_id in user_histories:
         del user_histories[chat_id]
-    bot.reply_to(message, "Память диалога сброшена, но основная инфа про тебя осталась при мне.")
+    bot.reply_to(message, "Память диалога сброшена, но основная инфа осталась при мне.")
 
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_text(message):
