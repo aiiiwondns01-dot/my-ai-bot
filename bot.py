@@ -48,7 +48,7 @@ def trigger_reminder(chat_id, text):
     except Exception as e:
         print(f"Ошибка отправки напоминания: {e}")
 
-def set_reminder_function(chat_id, amount, unit, reminder_text):
+def set_reminder(chat_id, amount, unit, reminder_text):
     try:
         amount = float(amount)
         if unit in ["секунда", "секунды", "секунд", "sec", "seconds"]:
@@ -64,20 +64,20 @@ def set_reminder_function(chat_id, amount, unit, reminder_text):
     except Exception as e:
         return f"Не получилось поставить напоминание: {e}"
 
-def add_to_notebook_function(chat_id, task_text):
+def add_to_notebook(chat_id, task_text):
     if chat_id not in user_notebooks:
         user_notebooks[chat_id] = []
     user_notebooks[chat_id].append(task_text)
     return f"Дело успешно записано в ежедневник: '{task_text}'."
 
-def show_notebook_function(chat_id):
+def show_notebook(chat_id):
     tasks = user_notebooks.get(chat_id, [])
     if not tasks:
         return "На сегодня в ежедневнике пока ничего нет."
     tasks_list = "\n".join([f"- {task}" for task in tasks])
     return f"Твои дела на сегодня:\n{tasks_list}"
 
-def get_weather_function(city="Саратов"):
+def get_weather(city="Саратов"):
     try:
         url = f"https://wttr.in/{city}?format=3&lang=ru"
         response = requests.get(url, timeout=5)
@@ -87,7 +87,7 @@ def get_weather_function(city="Саратов"):
     except Exception as e:
         return f"Ошибка получения погоды: {e}"
 
-def get_news_function():
+def get_news():
     try:
         url = "https://news.google.com/rss?hl=ru&gl=RU&ceid=RU:ru"
         response = requests.get(url, timeout=5)
@@ -119,7 +119,7 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "set_reminder_function",
+            "name": "set_reminder",
             "description": "Установить напоминание через определенное время (секунды, минуты или часы).",
             "parameters": {
                 "type": "object",
@@ -135,7 +135,7 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "add_to_notebook_function",
+            "name": "add_to_notebook",
             "description": "Записать важное дело или задачу в ежедневник.",
             "parameters": {
                 "type": "object",
@@ -149,7 +149,7 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "show_notebook_function",
+            "name": "show_notebook",
             "description": "Показать список всех записанных дел на сегодня.",
             "parameters": {"type": "object", "properties": {}}
         }
@@ -157,7 +157,7 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "get_weather_function",
+            "name": "get_weather",
             "description": "Узнать актуальную погоду в Саратове или другом городе.",
             "parameters": {
                 "type": "object",
@@ -170,7 +170,7 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "get_news_function",
+            "name": "get_news",
             "description": "Получить актуальные новости на сегодня.",
             "parameters": {"type": "object", "properties": {}}
         }
@@ -224,17 +224,17 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                 name = tool_call.function.name
                 
                 tool_result = ""
-                if name == "set_reminder_function":
-                    tool_result = set_reminder_function(chat_id, args.get("amount"), args.get("unit"), args.get("reminder_text"))
-                elif name == "add_to_notebook_function":
-                    tool_result = add_to_notebook_function(chat_id, args.get("task_text"))
-                elif name == "show_notebook_function":
-                    tool_result = show_notebook_function(chat_id)
-                elif name == "get_weather_function":
+                if name == "set_reminder":
+                    tool_result = set_reminder(chat_id, args.get("amount"), args.get("unit"), args.get("reminder_text"))
+                elif name == "add_to_notebook":
+                    tool_result = add_to_notebook(chat_id, args.get("task_text"))
+                elif name == "show_notebook":
+                    tool_result = show_notebook(chat_id)
+                elif name == "get_weather":
                     city = args.get("city", "Саратов")
-                    tool_result = get_weather_function(city)
-                elif name == "get_news_function":
-                    tool_result = get_news_function()
+                    tool_result = get_weather(city)
+                elif name == "get_news":
+                    tool_result = get_news()
                 
                 user_histories[chat_id].append({
                     "tool_call_id": tool_call.id,
@@ -404,7 +404,7 @@ def handle_photo(message):
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
 
-        caption = message.caption or "Опиши подробно, что видишь на фото, без лишних мыслей и рассуждений."
+        caption = message.caption or "Опиши подробно, что видишь на фото, без лишних мыслей, без тегов think и без форматирования."
 
         if chat_id not in user_histories:
             user_histories[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
