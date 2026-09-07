@@ -10,3 +10,5 @@ yt-dlp==2023.12.30
 lxml==5.1.0
 python-dotenv==1.0.0
 Pillow==11.1.0
+SpeechRecognition==3.10.0
+pydub==0.25.1
