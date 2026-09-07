@@ -364,7 +364,8 @@ SYSTEM_PROMPT = (
     "1. Никогда не пиши мысли, теги think, рассуждения или внутренний анализ. Выдавай сразу и только готовый ответ пользователю.\n"
     "2. НИКОГДА и ни при каких условиях не используй символы форматирования текста вроде двойных звездочек (**), одинарных (*), подчеркиваний (_) или решеток (#). Текст должен быть абсолютно простым, чистым, без выделений.\n"
     "3. Пиши всегда максимально коротко, четко и по делу, без «воды».\n"
-    "4. НЕ ИСПОЛЬЗУЙ теги <think> и не показывай свои мыслительные процессы."
+    "4. НЕ ИСПОЛЬЗУЙ теги <think> и не показывай свои мыслительные процессы.\n"
+    "5. Если пользователь просит добавить дело в ежедневник, напомнить о чем-то, показать погоду или новости, используй соответствующие инструменты."
 )
 
 def remove_think_tags(text):
@@ -399,6 +400,7 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True, fo
             )
             bot_response = response.choices[0].message.content
         else:
+            # Используем инструменты с явным tool_choice
             response = client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=messages,
@@ -410,18 +412,30 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True, fo
 
             response_message = response.choices[0].message
 
-            if response_message.tool_calls:
+            # Проверяем, вызвал ли модель инструменты
+            if hasattr(response_message, 'tool_calls') and response_message.tool_calls:
+                # Добавляем ответ модели в историю
                 user_histories[chat_id].append(response_message)
 
+                # Обрабатываем каждый вызов инструмента
                 for tool_call in response_message.tool_calls:
-                    args = json.loads(tool_call.function.arguments or "{}")
+                    try:
+                        args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+                    
                     name = tool_call.function.name
-
                     tool_result = ""
+
+                    # Выполняем соответствующий инструмент
                     if name == "set_reminder":
-                        tool_result = set_reminder(chat_id, args.get("amount"), args.get("unit"), args.get("reminder_text"))
+                        amount = args.get("amount")
+                        unit = args.get("unit", "минуты")
+                        reminder_text = args.get("reminder_text", "")
+                        tool_result = set_reminder(chat_id, amount, unit, reminder_text)
                     elif name == "add_to_notebook":
-                        tool_result = add_to_notebook(chat_id, args.get("task_text"))
+                        task_text = args.get("task_text", "")
+                        tool_result = add_to_notebook(chat_id, task_text)
                     elif name == "show_notebook":
                         tool_result = show_notebook(chat_id)
                     elif name == "get_weather":
@@ -430,8 +444,12 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True, fo
                     elif name == "get_news":
                         tool_result = get_news()
                     elif name == "process_link":
-                        tool_result = process_link(args.get("url"))
+                        url = args.get("url", "")
+                        tool_result = process_link(url)
+                    else:
+                        tool_result = f"Неизвестный инструмент: {name}"
 
+                    # Добавляем результат инструмента в историю
                     user_histories[chat_id].append({
                         "tool_call_id": tool_call.id,
                         "role": "tool",
@@ -439,6 +457,7 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True, fo
                         "content": tool_result
                     })
 
+                # Получаем финальный ответ от модели с учетом результатов инструментов
                 second_response = client.chat.completions.create(
                     model="openai/gpt-oss-120b",
                     messages=user_histories[chat_id],
@@ -447,11 +466,13 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True, fo
                 )
                 bot_response = second_response.choices[0].message.content
             else:
+                # Модель не вызвала инструменты, используем обычный ответ
                 bot_response = response_message.content
 
         # Очищаем ответ от think тегов
         bot_response = remove_think_tags(bot_response)
 
+        # Добавляем ответ ассистента в историю
         user_histories[chat_id].append({"role": "assistant", "content": bot_response})
 
         # Отправляем ответ
@@ -487,7 +508,9 @@ def reset_memory(message):
     chat_id = message.chat.id
     if chat_id in user_histories:
         del user_histories[chat_id]
-    bot.reply_to(message, "Память диалога сброшена, но основная инфа про тебя и Саратов при мне.")
+    if chat_id in user_notebooks:
+        del user_notebooks[chat_id]
+    bot.reply_to(message, "Память диалога и ежедневник сброшены, но основная инфа про тебя и Саратов при мне.")
 
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
@@ -495,16 +518,18 @@ def handle_voice(message):
     bot.send_chat_action(chat_id, 'typing')
     
     try:
+        # Скачиваем голосовое сообщение
         file_info = bot.get_file(message.voice.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         
+        # Сохраняем во временный файл
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_file:
             tmp_file.write(downloaded_file)
             tmp_path = tmp_file.name
         
         # Распознаем голос
         transcribed_text = transcribe_audio(tmp_path)
-        os.unlink(tmp_path)
+        os.unlink(tmp_path)  # Удаляем временный файл
         
         if "Ошибка" in transcribed_text:
             bot.reply_to(message, transcribed_text)
@@ -513,7 +538,7 @@ def handle_voice(message):
         # Отправляем распознанный текст
         bot.reply_to(message, f"Распознано: {transcribed_text}")
         
-        # Обрабатываем как текстовое сообщение
+        # Обрабатываем как текстовое сообщение с включенными инструментами
         process_ai_response(chat_id, transcribed_text, None, use_tools=True)
         
     except Exception as e:
@@ -534,7 +559,7 @@ def handle_text(message):
         use_tools = True
     else:
         # Проверяем, не запрос ли это на инструменты
-        tool_keywords = ["напомни", "напоминание", "ежедневник", "погода", "новости"]
+        tool_keywords = ["напомни", "напоминание", "ежедневник", "погода", "новости", "добавь дело", "запиши", "покажи дела"]
         use_tools = any(keyword in text.lower() for keyword in tool_keywords)
     
     process_ai_response(chat_id, text, message, use_tools=use_tools)
