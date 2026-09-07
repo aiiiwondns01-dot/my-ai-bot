@@ -60,6 +60,7 @@ def set_reminder(chat_id, amount, unit, reminder_text):
             delta_seconds = amount * 3600
         else:
             delta_seconds = amount * 60
+        
         run_time = datetime.now() + timedelta(seconds=delta_seconds)
         scheduler.add_job(trigger_reminder, 'date', run_date=run_time, args=[chat_id, reminder_text])
         return f"Успешно напомню через {amount} {unit}: '{reminder_text}'."
@@ -117,6 +118,18 @@ def fetch_web_page(url):
     except Exception as e:
         return f"Не удалось прочитать сайт: {e}"
 
+def format_duration(seconds):
+    if not seconds:
+        return "0с"
+    minutes, seconds = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}ч {minutes}м {seconds}с"
+    elif minutes > 0:
+        return f"{minutes}м {seconds}с"
+    else:
+        return f"{seconds}с"
+
 def get_video_info(url):
     try:
         ydl_opts = {
@@ -137,18 +150,6 @@ def get_video_info(url):
             return "Не удалось получить информацию о видео"
     except Exception as e:
         return f"Ошибка получения информации о видео: {e}"
-
-def format_duration(seconds):
-    if not seconds:
-        return "0с"
-    minutes, seconds = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours}ч {minutes}м {seconds}с"
-    elif minutes > 0:
-        return f"{minutes}м {seconds}с"
-    else:
-        return f"{seconds}с"
 
 def extract_article_info(url):
     try:
@@ -271,7 +272,8 @@ SYSTEM_PROMPT = (
     "СТРОГИЕ ПРАВИЛА ВЫВОДА:\n"
     "1. Никогда не пиши мысли, теги think, рассуждения или внутренний анализ.\n"
     "2. НИКОГДА и ни при каких условиях не используй символы форматирования текста вроде двойных звездочек (**), одинарных (*), подчеркиваний (_) или решеток (#). Текст должен быть абсолютно чистым.\n"
-    "3. Пиши всегда максимально коротко, четко и по делу."
+    "3. Пиши всегда максимально коротко, четко и по делу. "
+    "4. Используй только существующие инструменты: set_reminder, add_to_notebook, show_notebook, get_weather, get_news, process_link. Не выдумывай другие инструменты."
 )
 
 def remove_think_tags(text):
@@ -282,7 +284,7 @@ def remove_think_tags(text):
     # Удаляем незакрытые теги think или остатки
     text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
     text = re.sub(r'.*?</think>', '', text, flags=re.DOTALL)
-    # Убираем Markdown разметку (** *, _, #, `)
+    # Убираем Markdown разметку (**, *, _, #, `)
     text = re.sub(r'[\*_#`]', '', text)
     text = '\n'.join(line for line in text.splitlines() if line.strip())
     return text.strip()
@@ -293,13 +295,14 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True):
             user_histories[chat_id] = [
                 {"role": "system", "content": SYSTEM_PROMPT}
             ]
-
+        
         user_histories[chat_id].append({"role": "user", "content": user_text})
+        
         if len(user_histories[chat_id]) > 31:
             user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-30:]
-
+        
         messages = user_histories[chat_id]
-
+        
         # Запрос к модели с инструментами
         response = client.chat.completions.create(
             model="openai/gpt-oss-120b",
@@ -309,13 +312,13 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True):
             temperature=0.7,
             max_tokens=1500,
         )
-
+        
         response_message = response.choices[0].message
-
+        
         # Проверяем, вызвала ли модель инструменты
         if hasattr(response_message, 'tool_calls') and response_message.tool_calls:
             user_histories[chat_id].append(response_message)
-
+            
             for tool_call in response_message.tool_calls:
                 try:
                     args = json.loads(tool_call.function.arguments)
@@ -323,30 +326,32 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True):
                     args = {}
                 
                 name = tool_call.function.name
-                tool_result = ""
-
-                if name == "set_reminder":
-                    tool_result = set_reminder(chat_id, args.get("amount"), args.get("unit", "минуты"), args.get("reminder_text", ""))
-                elif name == "add_to_notebook":
-                    tool_result = add_to_notebook(chat_id, args.get("task_text", ""))
-                elif name == "show_notebook":
-                    tool_result = show_notebook(chat_id)
-                elif name == "get_weather":
-                    tool_result = get_weather(args.get("city", "Саратов"))
-                elif name == "get_news":
-                    tool_result = get_news()
-                elif name == "process_link":
-                    tool_result = process_link(args.get("url", ""))
+                
+                # Проверяем, существует ли такой инструмент
+                available_tools = {
+                    "set_reminder": lambda: set_reminder(chat_id, args.get("amount"), args.get("unit", "минуты"), args.get("reminder_text", "")),
+                    "add_to_notebook": lambda: add_to_notebook(chat_id, args.get("task_text", "")),
+                    "show_notebook": lambda: show_notebook(chat_id),
+                    "get_weather": lambda: get_weather(args.get("city", "Саратов")),
+                    "get_news": lambda: get_news(),
+                    "process_link": lambda: process_link(args.get("url", ""))
+                }
+                
+                if name in available_tools:
+                    try:
+                        tool_result = available_tools[name]()
+                    except Exception as e:
+                        tool_result = f"Ошибка при выполнении {name}: {e}"
                 else:
-                    tool_result = f"Неизвестный инструмент: {name}"
-
+                    tool_result = f"Неизвестный инструмент: {name}. Доступные: {', '.join(available_tools.keys())}"
+                
                 user_histories[chat_id].append({
                     "tool_call_id": tool_call.id,
                     "role": "tool",
                     "name": name,
                     "content": tool_result
                 })
-
+            
             second_response = client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=user_histories[chat_id],
@@ -356,10 +361,14 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True):
             bot_response = second_response.choices[0].message.content
         else:
             bot_response = response_message.content
-
+        
         bot_response = remove_think_tags(bot_response)
+        
+        if not bot_response or not bot_response.strip():
+            bot_response = "Хм, что-то пошло не так. Попробуй еще раз!"
+        
         user_histories[chat_id].append({"role": "assistant", "content": bot_response})
-
+        
         if len(bot_response) > 4000:
             for i in range(0, len(bot_response), 4000):
                 bot.send_message(chat_id, bot_response[i:i + 4000])
@@ -368,7 +377,7 @@ def process_ai_response(chat_id, user_text, message_to_reply, use_tools=True):
                 bot.reply_to(message_to_reply, bot_response)
             else:
                 bot.send_message(chat_id, bot_response)
-
+                
     except Exception as e:
         error_text = str(e)
         print(f"Ошибка ИИ: {error_text}")
@@ -403,6 +412,7 @@ def handle_voice(message):
     try:
         file_info = bot.get_file(message.voice.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
+        
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_file:
             tmp_file.write(downloaded_file)
             tmp_path = tmp_file.name
@@ -423,6 +433,7 @@ def handle_voice(message):
 def handle_text(message):
     chat_id = message.chat.id
     text = message.text
+    
     url_pattern = re.compile(r'https?://\S+')
     urls = url_pattern.findall(text)
     
@@ -443,10 +454,10 @@ def handle_photo(message):
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
         caption = message.caption or "Опиши подробно, что видишь на фото."
-
+        
         if chat_id not in user_histories:
             user_histories[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-
+        
         messages_payload = user_histories[chat_id].copy()
         messages_payload.append({
             "role": "user",
@@ -455,29 +466,32 @@ def handle_photo(message):
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]
         })
-
+        
         completion = client.chat.completions.create(
             model="qwen/qwen3.6-27b",
             messages=messages_payload,
             temperature=0.7,
-            max_tokens=800,  # Уменьшили токены, чтобы не превышать лимиты TPM (1000)
+            max_tokens=800,
         )
-
+        
         bot_response = completion.choices[0].message.content
         bot_response = remove_think_tags(bot_response)
-
+        
+        if not bot_response or not bot_response.strip():
+            bot_response = "Не удалось распознать изображение. Попробуй еще раз!"
+        
         user_histories[chat_id].append({"role": "user", "content": f"[Фото: {caption}]"})
         user_histories[chat_id].append({"role": "assistant", "content": bot_response})
-
+        
         if len(user_histories[chat_id]) > 31:
             user_histories[chat_id] = [user_histories[chat_id][0]] + user_histories[chat_id][-30:]
-
+        
         if len(bot_response) > 4000:
             for i in range(0, len(bot_response), 4000):
                 bot.send_message(chat_id, bot_response[i:i + 4000])
         else:
             bot.reply_to(message, bot_response)
-
+            
     except Exception as e:
         print(f"Ошибка картинки: {e}")
         bot.reply_to(message, f"Не удалось обработать изображение: {e}")
@@ -521,6 +535,7 @@ def handle_document(message):
             process_ai_response(chat_id, f"Содержимое файла {file_name}:\n{truncated}", message, use_tools=False)
         else:
             bot.reply_to(message, "Не удалось прочитать содержимое файла.")
+            
     except Exception as e:
         bot.reply_to(message, f"Ошибка обработки файла: {e}")
 
@@ -545,4 +560,4 @@ if __name__ == '__main__':
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     print("Воскресенье успешно запущен...")
-    bot.polling(none_stop=True, interval=1)
+    bot.polling(non_stop=True, interval=1)
