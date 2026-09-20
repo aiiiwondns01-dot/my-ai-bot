@@ -42,7 +42,7 @@ if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY не найден в переменных окружения!")
 
 # ====================== ИНИЦИАЛИЗАЦИЯ ======================
-# Актуальные модели Groq (на 2026 год):
+# Актуальные модели Groq (2026 год):
 #   - Текст / tool calling: openai/gpt-oss-120b
 #   - Vision (изображения): qwen/qwen3.6-27b
 TEXT_MODEL = "openai/gpt-oss-120b"
@@ -50,11 +50,13 @@ VISION_MODEL = "qwen/qwen3.6-27b"
 
 try:
     client = Groq(api_key=GROQ_API_KEY)
-    # Тестовый запрос с актуальной моделью
+    # Тестовый запрос с актуальной моделью.
+    # В библиотеке groq 0.5.0 используется параметр max_tokens,
+    # а не max_completion_tokens.
     test_response = client.chat.completions.create(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": "test"}],
-        max_completion_tokens=10
+        max_tokens=10
     )
     logger.info("✅ Groq API работает!")
 except Exception as e:
@@ -466,7 +468,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
             tools=tools,
             tool_choice="auto",
             temperature=0.7,
-            max_completion_tokens=1000,
+            max_tokens=1000,  # заменено с max_completion_tokens
         )
         
         logger.info("✅ Ответ от API получен")
@@ -516,7 +518,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                 model=TEXT_MODEL,
                 messages=user_histories[chat_id],
                 temperature=0.7,
-                max_completion_tokens=1000,
+                max_tokens=1000,  # заменено с max_completion_tokens
             )
             bot_response = second_response.choices[0].message.content
         else:
@@ -633,7 +635,7 @@ def handle_photo(message):
             model=VISION_MODEL,
             messages=messages_payload,
             temperature=0.7,
-            max_completion_tokens=800,
+            max_tokens=800,  # заменено с max_completion_tokens
         )
         
         bot_response = remove_think_tags(completion.choices[0].message.content)
