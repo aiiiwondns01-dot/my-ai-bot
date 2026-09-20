@@ -44,9 +44,9 @@ if not GROQ_API_KEY:
 # ====================== ИНИЦИАЛИЗАЦИЯ ======================
 try:
     client = Groq(api_key=GROQ_API_KEY)
-    # Тестовый запрос к API
+    # Тестовый запрос к API с АКТУАЛЬНОЙ моделью
     test_response = client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",  # <-- ИСПРАВЛЕНО
         messages=[{"role": "user", "content": "test"}],
         max_tokens=10
     )
@@ -92,7 +92,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is alive! "
+    return "Bot is alive!"
 
 @app.route('/health')
 def health():
@@ -106,7 +106,7 @@ def run_flask():
 def trigger_reminder(chat_id, text, reminder_id=None):
     try:
         bot.send_message(chat_id, f"⏰ Напоминание: {text}")
-        logger.info(f" Напоминание отправлено пользователю {chat_id}")
+        logger.info(f"⏰ Напоминание отправлено пользователю {chat_id}")
         if reminder_id:
             save_data()
     except Exception as e:
@@ -145,7 +145,7 @@ def set_reminder(chat_id, amount, unit, reminder_text):
             id=f"reminder_{reminder_id}"
         )
         
-        logger.info(f" Разовое напоминание установлено: {amount} {unit}")
+        logger.info(f"⏱ Разовое напоминание установлено: {amount} {unit}")
         return f"✅ Напомню через {amount} {unit}: '{reminder_text}'"
     except Exception as e:
         logger.error(f"Ошибка установки напоминания: {e}")
@@ -207,12 +207,12 @@ def set_daily_reminder(chat_id, time_str, reminder_text):
         )
         
         save_data()
-        logger.info(f" Ежедневное напоминание: {hour:02d}:{minute:02d}")
+        logger.info(f"📅 Ежедневное напоминание: {hour:02d}:{minute:02d}")
         return f"✅ Ежедневное напоминание на {hour:02d}:{minute:02d}: '{reminder_text}'"
     
     except Exception as e:
         logger.error(f"Ошибка установки ежедневного напоминания: {e}")
-        return f" Ошибка: {e}"
+        return f"❌ Ошибка: {e}"
 
 def list_daily_reminders(chat_id):
     reminders = user_reminders.get(chat_id, [])
@@ -221,7 +221,7 @@ def list_daily_reminders(chat_id):
     
     result = "📋 Твои напоминания:\n\n"
     for i, rem in enumerate(reminders, 1):
-        status = "🟢" if rem.get('active', True) else ""
+        status = "🟢" if rem.get('active', True) else "🔴"
         result += f"{i}. {status} {rem['hour']:02d}:{rem['minute']:02d} - {rem['text']}\n"
     
     return result
@@ -238,7 +238,7 @@ def show_notebook(chat_id):
     if not tasks:
         return "📭 В ежедневнике пусто"
     tasks_list = "\n".join([f"{i+1}. {task}" for i, task in enumerate(tasks)])
-    return f" Дела:\n\n{tasks_list}"
+    return f"📝 Дела:\n\n{tasks_list}"
 
 def get_weather(city="Саратов"):
     try:
@@ -285,7 +285,7 @@ def get_video_info(url):
                 result = [
                     f"🎬 {info.get('title', 'Неизвестно')}",
                     f"👤 {info.get('uploader', 'Неизвестно')}",
-                    f" {format_duration(info.get('duration', 0))}",
+                    f"⏱ {format_duration(info.get('duration', 0))}",
                     f"👁 {info.get('view_count', 0):,} просмотров"
                 ]
                 if info.get('like_count'):
@@ -298,7 +298,7 @@ def get_video_info(url):
 
 def extract_article_info(url):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
@@ -313,7 +313,7 @@ def extract_article_info(url):
         text = '\n'.join(chunk for chunk in lines if chunk)
         
         summary = text[:2000] + "..." if len(text) > 2000 else text
-        return f" {title_text}\n\n📝 Содержание:\n{summary}"
+        return f"📄 {title_text}\n\n📝 Содержание:\n{summary}"
     except Exception as e:
         logger.error(f"Ошибка статьи: {e}")
         return f"❌ Ошибка: {e}"
@@ -321,7 +321,7 @@ def extract_article_info(url):
 def detect_url_type(url):
     parsed = urlparse(url)
     domain = parsed.netloc.lower()
-    video_domains = ['youtube.com', 'youtu.be', 'vimeo.com', 'rutube.ru']
+    video_domains = ['youtube.com', 'youtu.be', 'vimeo.com', 'rutube.ru', 'dzen.ru']
     for vd in video_domains:
         if vd in domain:
             return 'video'
@@ -330,7 +330,7 @@ def detect_url_type(url):
 def process_link(url):
     if detect_url_type(url) == 'video':
         return f"🎥 Видео:\n{get_video_info(url)}"
-    return f" Статья:\n{extract_article_info(url)}"
+    return f"📰 Статья:\n{extract_article_info(url)}"
 
 # ====================== TOOLS ======================
 tools = [
@@ -354,11 +354,11 @@ tools = [
         "type": "function",
         "function": {
             "name": "set_daily_reminder",
-            "description": "Ежедневное напоминание на время",
+            "description": "Ежедневное напоминание на конкретное время",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "time": {"type": "string"},
+                    "time": {"type": "string", "description": "Время в формате 23:00 или 11 вечера"},
                     "reminder_text": {"type": "string"}
                 },
                 "required": ["time", "reminder_text"]
@@ -369,14 +369,14 @@ tools = [
         "type": "function",
         "function": {
             "name": "list_daily_reminders",
-            "description": "Показать напоминания"
+            "description": "Показать список ежедневных напоминаний"
         }
     },
     {
         "type": "function",
         "function": {
             "name": "add_to_notebook",
-            "description": "Записать дело",
+            "description": "Записать дело в ежедневник",
             "parameters": {
                 "type": "object",
                 "properties": {"task_text": {"type": "string"}},
@@ -388,14 +388,14 @@ tools = [
         "type": "function",
         "function": {
             "name": "show_notebook",
-            "description": "Показать дела"
+            "description": "Показать список дел"
         }
     },
     {
         "type": "function",
         "function": {
             "name": "get_weather",
-            "description": "Погода",
+            "description": "Узнать погоду в городе",
             "parameters": {
                 "type": "object",
                 "properties": {"city": {"type": "string"}}
@@ -406,14 +406,14 @@ tools = [
         "type": "function",
         "function": {
             "name": "get_news",
-            "description": "Новости"
+            "description": "Получить последние новости"
         }
     },
     {
         "type": "function",
         "function": {
             "name": "process_link",
-            "description": "Обработать ссылку",
+            "description": "Обработать ссылку на статью или видео",
             "parameters": {
                 "type": "object",
                 "properties": {"url": {"type": "string"}},
@@ -431,7 +431,7 @@ load_data()
 SYSTEM_PROMPT = (
     "Ты Воскресенье, друг-помощник. Общайся на 'ты', просто и кратко. "
     "Пользователь: Вова, 21 год, студент из Саратова. Интересы: VFX, Unreal Engine 5, Houdini, 3D, геймдев. "
-    "Правила: без форматирования (**, *, #), без тегов think, коротко и по делу."
+    "Правила: БЕЗ форматирования (**, *, #, `), БЕЗ тегов think, пиши коротко и по делу."
 )
 
 def remove_think_tags(text):
@@ -454,9 +454,9 @@ def process_ai_response(chat_id, user_text, message_to_reply):
         
         logger.info("🔄 Отправка запроса к Groq API...")
         
-        # Используем стабильную модель
+        # ИСПРАВЛЕНО: актуальная быстрая модель
         response = client.chat.completions.create(
-            model="llama3-8b-8192",  # Стабильная бесплатная модель
+            model="llama-3.1-8b-instant",
             messages=user_histories[chat_id],
             tools=tools,
             tool_choice="auto",
@@ -479,7 +479,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                     args = {}
                 
                 name = tool_call.function.name
-                logger.info(f" Инструмент: {name}")
+                logger.info(f"🛠 Инструмент: {name}")
                 
                 if name == "set_reminder":
                     tool_result = set_reminder(chat_id, args.get("amount", 0), args.get("unit", "минуты"), args.get("reminder_text", ""))
@@ -508,7 +508,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
                 })
             
             second_response = client.chat.completions.create(
-                model="llama3-8b-8192",
+                model="llama-3.1-8b-instant", # ИСПРАВЛЕНО
                 messages=user_histories[chat_id],
                 temperature=0.7,
                 max_tokens=1000,
@@ -546,7 +546,7 @@ def process_ai_response(chat_id, user_text, message_to_reply):
 # ====================== HANDLERS ======================
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, " Привет, Вова! Я Воскресенье. Чем помочь?")
+    bot.reply_to(message, "👋 Привет, Вова! Я Воскресенье. Чем помочь?")
 
 @bot.message_handler(commands=['reset'])
 def reset_memory(message):
@@ -587,7 +587,7 @@ def handle_voice(message):
         transcribed_text = transcribe_audio(tmp_path)
         os.unlink(tmp_path)
         
-        if "Ошибка" in transcribed_text:
+        if "Ошибка" in transcribed_text or "Не удалось" in transcribed_text:
             bot.reply_to(message, transcribed_text)
             return
         
@@ -595,7 +595,7 @@ def handle_voice(message):
         process_ai_response(chat_id, transcribed_text, None)
     except Exception as e:
         logger.error(f"Ошибка голосового: {e}")
-        bot.reply_to(message, f" Ошибка обработки голосового: {e}")
+        bot.reply_to(message, f"❌ Ошибка обработки голосового: {e}")
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
@@ -610,7 +610,7 @@ def handle_photo(message):
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
-        caption = message.caption or "Опиши фото"
+        caption = message.caption or "Опиши подробно, что видишь на фото"
         
         if chat_id not in user_histories:
             user_histories[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -624,9 +624,9 @@ def handle_photo(message):
             ]
         })
         
-        # Используем vision модель
+        # ИСПРАВЛЕНО: актуальная модель для зрения
         completion = client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
+            model="llama-3.2-11b-vision-preview",
             messages=messages_payload,
             temperature=0.7,
             max_tokens=800,
@@ -635,16 +635,16 @@ def handle_photo(message):
         bot_response = remove_think_tags(completion.choices[0].message.content)
         
         if not bot_response:
-            bot_response = " Не удалось распознать"
+            bot_response = "❌ Не удалось распознать изображение"
         
-        user_histories[chat_id].append({"role": "user", "content": f"[Фото]"})
+        user_histories[chat_id].append({"role": "user", "content": f"[Фото: {caption}]"})
         user_histories[chat_id].append({"role": "assistant", "content": bot_response})
         
         bot.reply_to(message, bot_response)
             
     except Exception as e:
         logger.error(f"Ошибка фото: {e}", exc_info=True)
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message, f"❌ Ошибка обработки фото: {e}")
 
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
@@ -679,19 +679,19 @@ def handle_document(message):
         elif file_name.endswith('.txt'):
             text_content = downloaded_file.decode('utf-8')
         else:
-            bot.reply_to(message, "📄 Поддерживаю: PDF, DOCX, TXT")
+            bot.reply_to(message, "📄 Поддерживаю только: PDF, DOCX, TXT")
             return
         
         if text_content:
             truncated = text_content[:8000]
-            caption = message.caption or f"Проанализируй {file_name}"
-            process_ai_response(chat_id, f"{caption}\n\n{truncated}", message)
+            caption = message.caption or f"Проанализируй файл {file_name}"
+            process_ai_response(chat_id, f"{caption}\n\nСодержимое:\n{truncated}", message)
         else:
-            bot.reply_to(message, "❌ Файл пустой")
+            bot.reply_to(message, "❌ Файл пустой или не содержит текста")
             
     except Exception as e:
         logger.error(f"Ошибка файла: {e}", exc_info=True)
-        bot.reply_to(message, f" Ошибка: {e}")
+        bot.reply_to(message, f"❌ Ошибка обработки файла: {e}")
 
 def transcribe_audio(file_path):
     try:
@@ -710,7 +710,7 @@ def transcribe_audio(file_path):
     except sr.UnknownValueError:
         return "❌ Не удалось распознать речь"
     except Exception as e:
-        return f"❌ Ошибка: {e}"
+        return f"❌ Ошибка распознавания: {e}"
 
 if __name__ == '__main__':
     logger.info("🚀 Запуск бота...")
