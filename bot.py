@@ -1956,4 +1956,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"set_my_commands: {e}")
     logger.info("🚀 Бот запущен")
-    bot.infinite_polling(timeout=60, long_polling_timeout=60)
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
