@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Трекер</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="mobile.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="vendor/chart.umd.min.js"></script>
+</head>
+<body>
+<aside class="side">
+  <div class="brand">ТРЕКЕР</div>
+  <div class="today-date" id="todayDate"></div>
+  <nav class="nav">
+    <button data-page="today">Сегодня</button>
+    <button data-page="notes">Заметки</button>
+    <button data-page="tasks">Дела</button>
+    <button data-page="schedule">Расписание</button>
+  </nav>
+  <div class="side-foot">Данные: data.json</div>
+</aside>
+<main id="main"><div class="loading">Загрузка...</div></main>
+<div id="modal"></div>
+<div id="toast" class="toast"></div>
+<script src="app.js"></script>
+<script src="tg.js"></script>
+</body>
+</html>

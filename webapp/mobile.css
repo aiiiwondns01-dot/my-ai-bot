@@ -1,0 +1,65 @@
+/* Трекер на телефоне (мини-приложение Telegram): поверх style.css от Трекер.exe */
+body {
+  display: block; overflow: auto; height: auto; min-height: 100%;
+  font-size: 15px; -webkit-tap-highlight-color: transparent;
+}
+
+/* боковая панель становится верхней полосой с вкладками */
+.side {
+  position: sticky; top: 0; z-index: 20; width: auto; border-right: 0; border-bottom: 1px solid var(--line);
+  padding: 10px 12px 8px; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+}
+.brand { font-size: 13px; }
+.today-date { margin: 0; font-size: 12px; }
+.side-foot { display: none; }
+.nav { flex-direction: row; width: 100%; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+.nav::-webkit-scrollbar { display: none; }
+.nav button { flex: 1 0 auto; text-align: center; padding: 8px 10px; font-size: 14px; white-space: nowrap; }
+
+main { overflow: visible; padding: 14px 12px 40px; }
+h1 { font-size: 22px; }
+.sub { margin-bottom: 14px; }
+
+/* все сетки - в одну колонку, плитки по две */
+.row, .cols-2, .cols-main { grid-template-columns: minmax(0, 1fr) !important; gap: 12px; margin-bottom: 12px; }
+.cols-4 { grid-template-columns: 1fr 1fr !important; }
+.tile { padding: 12px; }
+.tile b { font-size: 24px; }
+.rings { flex-wrap: wrap; gap: 12px; }
+.ring { width: 120px; height: 120px; }
+.donut-wrap { grid-template-columns: 120px 1fr; gap: 12px; }
+.donut-wrap .chart-box { height: 120px; }
+.card-b { padding: 12px; }
+.card-h { padding: 9px 12px; font-size: 12px; flex-wrap: wrap; }
+
+/* списки и формы - под палец */
+.li { gap: 10px; padding: 11px 0; }
+.li .time { width: auto; min-width: 46px; font-size: 13px; }
+.cb { width: 24px; height: 24px; }
+.cb.on::after { width: 6px; height: 11px; }
+.form { gap: 8px; }
+.form .inp, .form select.inp { flex: 1 1 140px; padding: 10px; font-size: 16px; } /* 16px - iPhone не зумит поле */
+.inp.grow { min-width: 0; flex-basis: 100%; }
+.btn { padding: 10px 18px; }
+.area { font-size: 16px; }
+.note { max-width: 100%; }
+.note-h { flex-wrap: wrap; }
+
+/* таблица дел и календарь шире экрана - листаются вбок */
+.card-b:has(table), .hgrid-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.card-b table:not(.hgrid) { min-width: 680px; }
+td input.cell, td select.cell { font-size: 15px; }
+.cal { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.cal-head, .cal-grid { min-width: 760px; }
+.cal-body { max-height: 70vh; min-height: 300px; }
+.zoom .hint { display: none; }
+[data-act="test-notify"] { display: none; }
+
+/* подробности - на весь экран */
+.modal-bg { padding: 0; align-items: stretch; }
+.modal { width: 100%; border-radius: 0; max-height: none; height: 100%; }
+.modal-h, .modal-meta, .modal-b, .modal-f { padding-left: 14px; padding-right: 14px; }
+.modal-f .hint { display: none; }
+.area.big { min-height: 50vh; }
+
+.toast { left: 12px; right: 12px; bottom: 16px; }
