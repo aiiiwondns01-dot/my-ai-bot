@@ -111,6 +111,7 @@ state = {
     "tracker": None,       # данные Трекера - те же, что data.json на ноутбуке
     "tracker_rev": 0,      # номер версии: ноутбук и мини-приложение по нему ловят чужие правки
     "tracker_fired": {},   # какие напоминания Трекера уже отправлены
+    "brain": {},           # память ассистента с ноутбука: profile, files {имя: {title, text}}, hash
 }
 
 
@@ -1208,6 +1209,8 @@ TOOLS = [
     fn("complete_task", "Отметить дело выполненным по номеру из списка", {"number": {"type": "integer"}}, ["number"]),
     fn("remember_fact", "Запомнить надолго важный факт о Вове, его планах, предпочтениях, проектах", {"fact": S}, ["fact"]),
     fn("forget_fact", "Забыть факт по номеру", {"number": {"type": "integer"}}, ["number"]),
+    fn("read_memory", "Прочитать файл подробной памяти о Вове с ноутбука (список файлов - в системном сообщении)",
+       {"name": S}, ["name"]),
     fn("get_schedule", "Расписание пар на день", {"day": {"type": "string", "description": "сегодня, завтра или день недели"}}),
     fn("get_weather", "Погода в городе", {"city": S}),
     fn("get_news", "Последние новости"),
@@ -1273,6 +1276,8 @@ def run_tool(name, a):
             return cancel_reminders(a["which"])
         if name == "add_task":
             return add_task(a["task_text"], a.get("due"), a.get("time"), a.get("category"), a.get("priority"))
+        if name == "read_memory":
+            return read_memory(a["name"])
         if name == "note_for_assistant":
             return note_for_assistant(a["text"], a.get("kind") or "task")
         if name == "list_tasks":
@@ -1342,12 +1347,41 @@ MATERIAL_PROMPT = ("Ты разбираешь материал для Вовы: 
                    "ничего не выдумывай. Если ответа в материале нет - так и скажи.")
 
 
+BRAIN_TEXT_MAX = 6000  # знаков файла памяти за раз: лимит Groq - 8000 токенов в минуту
+
+
+def brain_files():
+    with lock:
+        return dict((state.get("brain") or {}).get("files") or {})
+
+
+def read_memory(name):
+    files = brain_files()
+    if not files:
+        return "Память с ноутбука ещё не пришла"
+    item = files.get(name) or next((v for k, v in files.items() if name.lower() in k.lower()
+                                    or name.lower() in v.get("title", "").lower()), None)
+    if not item:
+        return "Нет такого файла. Есть: " + ", ".join(files)
+    text = item.get("text", "")
+    more = f"\n\n(показаны первые {BRAIN_TEXT_MAX} знаков из {len(text)})" if len(text) > BRAIN_TEXT_MAX else ""
+    return text[:BRAIN_TEXT_MAX] + more
+
+
 def system_prompt():
     n = now()
     with lock:
         facts = list(state["facts"])[-60:]
         summary = state["summary"]
-    p = BASE_PROMPT + f"\n\nСейчас у Вовы: {n.strftime('%Y-%m-%d %H:%M')}, {WEEKDAYS[n.weekday()]}."
+        brain = state.get("brain") or {}
+    p = BASE_PROMPT
+    if brain.get("profile"):
+        # свежая выжимка о Вове от ассистента с ноутбука важнее зашитой в код
+        p += "\n\nО Вове (от ассистента с ноутбука, свежее и важнее того, что выше):\n" + brain["profile"][:3000]
+    if brain.get("files"):
+        p += ("\n\nПодробная память на ноутбуке - вызывай read_memory, когда тема касается файла: "
+              + "; ".join(f"{k} - {v.get('title', '')}" for k, v in brain["files"].items()))
+    p += f"\n\nСейчас у Вовы: {n.strftime('%Y-%m-%d %H:%M')}, {WEEKDAYS[n.weekday()]}."
     if facts:
         p += "\n\nЧто ты помнишь о Вове:\n" + "\n".join(f"- {f}" for f in facts)
     if summary:
@@ -1791,6 +1825,9 @@ def cmd_status(m):
         "Сверка с ноутбуком: " + ("ключ SYNC_KEY задан" if SYNC_KEY else "НЕ настроена, нет SYNC_KEY"),
         f"Трекер: версия {state.get('tracker_rev') or 0}, напоминаний {len(sorted_reminders())}, "
         f"открытых дел {len(open_tasks())}",
+        "Память с ноутбука: " + (f"{len((state.get('brain') or {}).get('files') or {})} файлов, от "
+                                 f"{state['brain'].get('at', '?').replace('T', ' ')}" if (state.get("brain") or {}).get("profile")
+                                 else "ещё не приходила"),
         f"Фактов: {len(state['facts'])}, ссылок: {len(state['links'])}"]))
 
 
@@ -2117,7 +2154,28 @@ def api_tracker_get():
     if bad:
         return bad
     data, rev = tracker_copy()
-    return {"data": data, "rev": rev}
+    return {"data": data, "rev": rev, "brain_hash": (state.get("brain") or {}).get("hash", "")}
+
+
+@app.route("/api/brain", methods=["POST"])
+def api_brain_put():
+    """Память ассистента с ноутбука. Только по ключу сверки - из мини-приложения её не меняют."""
+    key = request.headers.get("X-Sync-Key", "")
+    if not (SYNC_KEY and key and hmac.compare_digest(key, SYNC_KEY)):
+        return {"error": "forbidden"}, 403
+    if not READY["ok"]:
+        return {"error": "starting"}, 503
+    body = request.get_json(force=True, silent=True) or {}
+    files = body.get("files")
+    if not isinstance(files, dict) or not isinstance(body.get("profile"), str):
+        return {"error": "bad data"}, 400
+    with lock:
+        state["brain"] = {"profile": body["profile"][:4000], "hash": str(body.get("hash", "")), "at": stamp(),
+                          "files": {str(k)[:60]: {"title": str(v.get("title", ""))[:120], "text": str(v.get("text", ""))[:60000]}
+                                    for k, v in list(files.items())[:40] if isinstance(v, dict)}}
+    touch()
+    logger.info(f"Память с ноутбука: {len(files)} файлов")
+    return {"ok": True}
 
 
 @app.route("/api/tracker/rev", methods=["GET"])
