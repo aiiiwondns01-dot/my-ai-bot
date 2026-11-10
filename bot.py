@@ -18,7 +18,9 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from threading import Thread, RLock, Lock, Timer
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, parse_qsl
+import hmac
+import hashlib
 
 import pytz
 import requests
@@ -29,7 +31,7 @@ import docx
 import groq
 import imageio_ffmpeg
 from bs4 import BeautifulSoup
-from flask import Flask
+from flask import Flask, request, send_from_directory
 from groq import Groq
 from pypdf import PdfReader
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -47,6 +49,8 @@ OWNER_ID = int(os.environ["OWNER_ID"]) if os.environ.get("OWNER_ID") else None
 SELF_URL = os.environ.get("RENDER_EXTERNAL_URL")  # Render задаёт сам
 TG_API_ID = int(os.environ["TG_API_ID"]) if os.environ.get("TG_API_ID") else None  # для файлов больше 20 МБ
 TG_API_HASH = os.environ.get("TG_API_HASH")
+SYNC_KEY = os.environ.get("SYNC_KEY")  # пароль сверки Трекера с ноутбуком, тот же в %APPDATA%\Tracker\sync.json
+WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")  # мини-приложение Трекера
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     raise ValueError("Нужны переменные окружения TELEGRAM_TOKEN и GROQ_API_KEY")
@@ -104,6 +108,9 @@ state = {
     "summary": "",     # сжатая старая часть диалога
     "brief": {"on": True, "time": "09:00"},
     "sync_msg": None,
+    "tracker": None,       # данные Трекера - те же, что data.json на ноутбуке
+    "tracker_rev": 0,      # номер версии: ноутбук и мини-приложение по нему ловят чужие правки
+    "tracker_fired": {},   # какие напоминания Трекера уже отправлены
 }
 
 
@@ -223,9 +230,6 @@ def restore_state(data):
     loaded = json.loads(data.decode("utf-8"))
     if not isinstance(loaded, dict) or "reminders" not in loaded:
         raise UserError("Это не файл памяти бота")
-    for job in scheduler.get_jobs():
-        if job.id.startswith("rem_"):
-            scheduler.remove_job(job.id)
     with lock:
         state.update({k: v for k, v in loaded.items() if k in state and k not in ("owner", "sync_msg")})
         state["sync_msg"] = None
@@ -266,12 +270,117 @@ def lessons_text(day=None):
     return "\n".join(lines)
 
 
-# ====================== НАПОМИНАНИЯ ======================
-def sorted_reminders():
+# ====================== ТРЕКЕР: ДЕЛА И НАПОМИНАНИЯ ======================
+# Дела, напоминания, пары и заметки - те же, что в приложении Трекер на ноутбуке и в мини-приложении
+# в Telegram. Всё лежит в state["tracker"] (формат data.json Трекера). Ноутбук раз в минуту сверяется
+# с сервером через /api/tracker, мини-приложение читает и пишет туда же. Время везде - UTC+4.
+TRACKER_EMPTY = {
+    "settings": {"categories": ["Учёба", "Торты", "Работа", "Соцсети", "Личное", "Здоровье"],
+                 "schedule_remind_min": 15},
+    "habits": [], "checks": {}, "tasks": [], "schedule": [], "reminders": [], "notes": [],
+}
+CATEGORIES = TRACKER_EMPTY["settings"]["categories"]
+PRIORITIES = ("low", "mid", "high", "crit")
+REPEAT_RU = {"daily": "каждый день", "weekdays": "по будням"}
+LATE_WINDOW = 30  # минут: опоздавшее напоминание (бот перезапускался) ещё отправляем
+
+
+def tid():
+    return uuid.uuid4().hex[:12]
+
+
+def tr():
+    """Данные Трекера. Вызывать под lock."""
+    if not isinstance(state.get("tracker"), dict):
+        state["tracker"] = json.loads(json.dumps(TRACKER_EMPTY))
+    d = state["tracker"]
+    for k in ("habits", "tasks", "schedule", "reminders", "notes"):
+        if not isinstance(d.get(k), list):
+            d[k] = []
+    d.setdefault("checks", {})
+    d.setdefault("settings", json.loads(json.dumps(TRACKER_EMPTY["settings"])))
+    return d
+
+
+def tracker_copy():
     with lock:
-        once = sorted([r for r in state["reminders"] if r["kind"] == "once"], key=lambda r: r["at"])
-        repeat = sorted([r for r in state["reminders"] if r["kind"] != "once"], key=lambda r: r["time"])
-    return once + repeat
+        return json.loads(json.dumps(tr())), str(state.get("tracker_rev") or 0)
+
+
+def tracker_changed():
+    """Отметить новую версию. Вызывать под lock, touch() - после."""
+    state["tracker_rev"] = int(state.get("tracker_rev") or 0) + 1
+
+
+def stamp():
+    return now().strftime("%Y-%m-%dT%H:%M")
+
+
+def at_local(day, hm):
+    h, m = [int(x) for x in hm.split(":")[:2]]
+    return TZ.localize(datetime(day.year, day.month, day.day, h, m))
+
+
+def tracker_events(d, day):
+    """(ключ, когда, текст, кнопки отложить) - всё, что в этот день должно напомнить о себе."""
+    ds, wd = day.isoformat(), day.weekday()
+    out = []
+    for r in d.get("reminders", []):
+        rep = r.get("repeat", "none")
+        if r.get("off") or not r.get("time"):
+            continue
+        if (rep == "none" and r.get("date") != ds) or (rep == "weekdays" and wd > 4) \
+                or (rep == "weekly" and r.get("day") != wd):
+            continue
+        out.append((f"r:{r['id']}:{ds}", at_local(day, r["time"]), f"⏰ Напоминание: {r.get('title', '')}", True))
+    before = timedelta(minutes=d.get("settings", {}).get("schedule_remind_min", 15))
+    for s in d.get("schedule", []):
+        if s.get("day") != wd or not s.get("start"):
+            continue
+        place = f", {s['place']}" if s.get("place") else ""
+        out.append((f"s:{s['id']}:{ds}", at_local(day, s["start"]) - before,
+                    f"🎓 Скоро: {s.get('title', '')} {s['start']}-{s.get('end', '')}{place}", False))
+    for t in d.get("tasks", []):
+        if t.get("due") == ds and t.get("time") and t.get("status") != "done":
+            out.append((f"t:{t['id']}:{ds}", at_local(day, t["time"]), f"📌 Дело: {t.get('title', '')}", True))
+    return out
+
+
+def tracker_tick():
+    """Раз в 20 секунд: напоминания, дела со временем, пары и записки ассистента - в Telegram."""
+    owner = state.get("owner")
+    if not owner:
+        return
+    n = now()
+    d, _ = tracker_copy()
+    send = []
+    with lock:
+        fired = state.setdefault("tracker_fired", {})
+        for day in (n.date() - timedelta(days=1), n.date()):
+            for key, when, text, snooze in tracker_events(d, day):
+                if key in fired or when > n:
+                    continue
+                fired[key] = n.isoformat(timespec="seconds")
+                if n - when <= timedelta(minutes=LATE_WINDOW):
+                    send.append((text, snooze))
+        fresh = (n - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")
+        for note in d.get("notes", []):
+            key = f"n:{note.get('id')}"
+            if note.get("from") == "claude" and not note.get("read") and key not in fired \
+                    and note.get("at", "") > fresh:
+                fired[key] = n.isoformat(timespec="seconds")
+                head = "❓ Ассистент ждёт ответа" if note.get("kind") == "question" else "💬 Записка от ассистента"
+                send.append((f"{head}:\n{note.get('text', '')[:1500]}", False))
+        cutoff = (n - timedelta(days=3)).isoformat()
+        for k in [k for k, v in fired.items() if v < cutoff]:
+            del fired[k]
+    for text, snooze in send:
+        try:
+            bot.send_message(owner, text, reply_markup=snooze_kb() if snooze else None)
+        except Exception as e:
+            logger.error(f"tracker_tick: {e}")
+    if send:
+        touch()
 
 
 def snooze_kb():
@@ -282,49 +391,49 @@ def snooze_kb():
     return kb
 
 
-def fire_reminder(rid, late=False):
+def rem_when(r):
+    rep = r.get("repeat", "none")
+    if rep == "none":
+        date = r.get("date") or ""
+        return f"{date[8:10]}.{date[5:7]} {r.get('time', '')}" if date else r.get("time", "")
+    if rep == "weekly":
+        return f"{DAY_KEYS[r.get('day', 0) % 7]} {r.get('time', '')}"
+    return f"{REPEAT_RU.get(rep, rep)} {r.get('time', '')}"
+
+
+def sorted_reminders():
+    """Включённые напоминания Трекера, без разовых из прошлого."""
+    n = now().strftime("%Y-%m-%d %H:%M")
     with lock:
-        rem = next((r for r in state["reminders"] if r["id"] == rid), None)
-    if not rem:
-        return
-    text = f"⏰ Напоминание: {rem['text']}" + (" (пропущено, пока бот спал)" if late else "")
-    try:
-        bot.send_message(state["owner"], text, reply_markup=snooze_kb())
-    except Exception as e:
-        logger.error(f"fire_reminder: {e}")
-    if rem["kind"] == "once":
-        with lock:
-            state["reminders"] = [r for r in state["reminders"] if r["id"] != rid]
-        touch()
+        items = [dict(r) for r in tr()["reminders"] if not r.get("off") and r.get("time")]
+    once = sorted([r for r in items if r.get("repeat", "none") == "none"
+                   and f"{r.get('date', '')} {r['time']}" >= n], key=lambda r: (r.get("date", ""), r["time"]))
+    repeat = sorted([r for r in items if r.get("repeat", "none") != "none"],
+                    key=lambda r: (r["time"], r.get("day", 0)))
+    return once + repeat
 
 
-def schedule_reminder(rem):
-    job_id = f"rem_{rem['id']}"
-    if rem["kind"] == "once":
-        at = datetime.fromisoformat(rem["at"])
-        if at <= now():
-            scheduler.add_job(fire_reminder, "date", run_date=now() + timedelta(seconds=5),
-                              args=[rem["id"], True], id=job_id, replace_existing=True)
-        else:
-            scheduler.add_job(fire_reminder, "date", run_date=at, args=[rem["id"]],
-                              id=job_id, replace_existing=True)
-    else:
-        h, m = parse_clock(rem["time"])
-        days = ",".join(map(str, rem["days"])) if rem["kind"] == "weekly" else "*"
-        scheduler.add_job(fire_reminder, CronTrigger(day_of_week=days, hour=h, minute=m, timezone=TZ),
-                          args=[rem["id"]], id=job_id, replace_existing=True)
+def add_reminders(rems):
+    with lock:
+        tr()["reminders"].extend(rems)
+        tracker_changed()
+    touch()
 
 
-def fmt_dt(iso):
-    return datetime.fromisoformat(iso).astimezone(TZ).strftime("%d.%m %H:%M")
+def add_once(at, text):
+    at = at.astimezone(TZ)
+    if at.second or at.microsecond:  # Трекер считает в минутах - округляем вверх
+        at = (at + timedelta(minutes=1)).replace(second=0, microsecond=0)
+    add_reminders([{"id": tid(), "title": text, "time": at.strftime("%H:%M"), "repeat": "none",
+                    "date": at.strftime("%Y-%m-%d")}])
+    return f"✅ Напомню {at.strftime('%d.%m %H:%M')} (UTC+4): {text}"
 
 
 def set_reminder(amount, unit, reminder_text):
     amount = float(amount)
     unit = unit.lower()
     mult = 1 if unit.startswith("сек") else 3600 if unit.startswith("час") else 86400 if unit.startswith("д") else 60
-    at = now() + timedelta(seconds=amount * mult)
-    return add_once(at, reminder_text)
+    return add_once(now() + timedelta(seconds=amount * mult), reminder_text)
 
 
 def set_reminder_at(datetime_local, reminder_text):
@@ -334,25 +443,14 @@ def set_reminder_at(datetime_local, reminder_text):
     return add_once(at, reminder_text)
 
 
-def add_once(at, text):
-    rem = {"id": uuid.uuid4().hex[:8], "text": text, "kind": "once", "at": at.isoformat()}
-    with lock:
-        state["reminders"].append(rem)
-    schedule_reminder(rem)
-    touch()
-    return f"✅ Напомню {fmt_dt(rem['at'])} (UTC+4): {text}"
-
-
 def set_daily_reminder(time_str, reminder_text):
     h, m = parse_clock(time_str)
     hhmm = f"{h:02d}:{m:02d}"
     with lock:
-        if any(r["kind"] == "daily" and r["time"] == hhmm and r["text"] == reminder_text for r in state["reminders"]):
+        if any(r.get("repeat") == "daily" and r.get("time") == hhmm and r.get("title") == reminder_text
+               for r in tr()["reminders"]):
             return f"❌ Такое ежедневное напоминание на {hhmm} уже есть"
-        rem = {"id": uuid.uuid4().hex[:8], "text": reminder_text, "kind": "daily", "time": hhmm}
-        state["reminders"].append(rem)
-    schedule_reminder(rem)
-    touch()
+    add_reminders([{"id": tid(), "title": reminder_text, "time": hhmm, "repeat": "daily"}])
     return f"✅ Каждый день в {hhmm} (UTC+4): {reminder_text}"
 
 
@@ -376,15 +474,21 @@ def fmt_days(days):
     return ", ".join(DAY_KEYS[d] for d in days)
 
 
+def weekly_items(days, hhmm, text):
+    """В Трекере повтор - это каждый день, по будням или один день недели. Остальное - по записи на день."""
+    if days == list(range(7)):
+        return [{"id": tid(), "title": text, "time": hhmm, "repeat": "daily"}]
+    if days == [0, 1, 2, 3, 4]:
+        return [{"id": tid(), "title": text, "time": hhmm, "repeat": "weekdays"}]
+    return [{"id": tid(), "title": text, "time": hhmm, "repeat": "weekly", "day": d} for d in days]
+
+
 def set_weekly_reminder(days, time_str, reminder_text):
     h, m = parse_clock(time_str)
-    rem = {"id": uuid.uuid4().hex[:8], "text": reminder_text, "kind": "weekly",
-           "time": f"{h:02d}:{m:02d}", "days": parse_days(days)}
-    with lock:
-        state["reminders"].append(rem)
-    schedule_reminder(rem)
-    touch()
-    return f"✅ По дням ({fmt_days(rem['days'])}) в {rem['time']} (UTC+4): {reminder_text}"
+    hhmm = f"{h:02d}:{m:02d}"
+    days = parse_days(days)
+    add_reminders(weekly_items(days, hhmm, reminder_text))
+    return f"✅ По дням ({fmt_days(days)}) в {hhmm} (UTC+4): {reminder_text}"
 
 
 def list_reminders():
@@ -393,14 +497,8 @@ def list_reminders():
         return "📭 Напоминаний нет"
     lines = ["📋 Напоминания (время UTC+4):"]
     for i, r in enumerate(items, 1):
-        if r["kind"] == "once":
-            when = fmt_dt(r["at"])
-        elif r["kind"] == "weekly":
-            when = f"{fmt_days(r['days'])} {r['time']}"
-        else:
-            when = f"каждый день {r['time']}"
-        lines.append(f"{i}. {when} - {r['text']}")
-    lines.append("\nОтменить: /cancel 2, /cancel 1,3 или /cancel all")
+        lines.append(f"{i}. {rem_when(r)} - {r.get('title', '')}")
+    lines.append("\nОтменить: /cancel 2, /cancel 1,3 или /cancel all. Всё это есть и в Трекере.")
     return "\n".join(lines)
 
 
@@ -419,39 +517,44 @@ def cancel_reminders(arg):
             return f"❌ Нет номера {', '.join(map(str, bad))}. Список: /reminders"
         victims = [items[n - 1] for n in nums]
     else:
-        victims = [r for r in items if arg.lower() in r["text"].lower()]
+        victims = [r for r in items if arg.lower() in r.get("title", "").lower()]
         if not victims:
             return f"❌ Не нашёл напоминание по слову '{arg}'. Список: /reminders"
     ids = {r["id"] for r in victims}
-    for rid in ids:
-        try:
-            scheduler.remove_job(f"rem_{rid}")
-        except Exception:
-            pass
     with lock:
-        state["reminders"] = [r for r in state["reminders"] if r["id"] not in ids]
+        d = tr()
+        d["reminders"] = [r for r in d["reminders"] if r.get("id") not in ids]
+        tracker_changed()
     touch()
-    return "🗑 Отменил:\n" + "\n".join(f"- {r['text']}" for r in victims)
+    return "🗑 Отменил:\n" + "\n".join(f"- {r.get('title', '')}" for r in victims)
 
 
-# ====================== ДЕЛА ======================
 def open_tasks():
     with lock:
-        t = [x for x in state["tasks"] if not x["done"]]
-    return sorted(t, key=lambda x: (x["due"] is None, x["due"] or ""))
+        t = [dict(x) for x in tr()["tasks"] if x.get("status") != "done"]
+    return sorted(t, key=lambda x: (not x.get("due"), x.get("due") or "", x.get("time") or ""))
 
 
-def add_task(task_text, due=None):
-    due = (due or "").strip() or None
+def add_task(task_text, due=None, time_str=None, category=None, priority=None):
+    due = (due or "").strip()
     if due:
         try:
             datetime.strptime(due, "%Y-%m-%d")
         except ValueError:
             return "❌ Срок нужен в формате ГГГГ-ММ-ДД"
+    hhmm = ""
+    if (time_str or "").strip():
+        h, m = parse_clock(time_str)
+        hhmm = f"{h:02d}:{m:02d}"
+    t = {"id": tid(), "title": task_text.strip(), "category": category if category in CATEGORIES else "Личное",
+         "priority": priority if priority in PRIORITIES else "mid", "status": "todo",
+         "due": due, "time": hhmm, "created": now().strftime("%Y-%m-%d")}
     with lock:
-        state["tasks"].append({"id": uuid.uuid4().hex[:8], "text": task_text, "due": due, "done": False})
+        tr()["tasks"].append(t)
+        tracker_changed()
     touch()
-    return f"✅ Записал: {task_text}" + (f" (до {due})" if due else "")
+    when = f" ({due}{' ' + hhmm if hhmm else ''})" if due else ""
+    return f"✅ В Трекере, {t['category']}: {t['title']}{when}"
 
 
 def list_tasks():
@@ -459,12 +562,13 @@ def list_tasks():
     if not t:
         return "📭 Открытых дел нет"
     today = now().strftime("%Y-%m-%d")
-    lines = ["📝 Дела:"]
+    lines = ["📝 Дела из Трекера:"]
     for i, x in enumerate(t, 1):
         mark = ""
-        if x["due"]:
-            mark = f" (до {x['due']}" + (", ПРОСРОЧЕНО)" if x["due"] < today else ")")
-        lines.append(f"{i}. {x['text']}{mark}")
+        if x.get("due"):
+            mark = f" ({x['due']}{' ' + x['time'] if x.get('time') else ''}" + \
+                   (", ПРОСРОЧЕНО)" if x["due"] < today else ")")
+        lines.append(f"{i}. {x.get('title', '')}{mark}")
     lines.append("\nГотово: /done 2")
     return "\n".join(lines)
 
@@ -473,16 +577,60 @@ def complete_task(number):
     t = open_tasks()
     try:
         n = int(number)
-        task = t[n - 1]
         assert n >= 1
+        task = t[n - 1]
     except Exception:
         return "❌ Нет такого номера. Список: /tasks"
     with lock:
-        for x in state["tasks"]:
-            if x["id"] == task["id"]:
-                x["done"] = True
+        for x in tr()["tasks"]:
+            if x.get("id") == task["id"]:
+                x["status"] = "done"
+                x["done_at"] = now().strftime("%Y-%m-%d")
+        tracker_changed()
     touch()
-    return f"✅ Готово: {task['text']}"
+    return f"✅ Готово: {task.get('title', '')}"
+
+
+def note_for_assistant(text, kind="task"):
+    """Запись во вкладку Заметки - её на ноутбуке читает ассистент (Claude)."""
+    kind = kind if kind in ("task", "note") else "task"
+    n = {"id": tid(), "from": "vova", "kind": kind, "text": text.strip(), "at": stamp()}
+    if kind == "task":
+        n["status"] = "new"
+    with lock:
+        tr()["notes"].append(n)
+        tracker_changed()
+    touch()
+    return "✅ Оставил ассистенту в Заметках Трекера" + (" как задание" if kind == "task" else "")
+
+
+def migrate_old():
+    """Старые напоминания и дела бота (до Трекера) переезжают в Трекер один раз."""
+    with lock:
+        old_r, old_t = state.get("reminders") or [], state.get("tasks") or []
+        if not old_r and not old_t:
+            return
+        d = tr()
+        for r in old_r:
+            text = r.get("text", "")
+            if r.get("kind") == "once":
+                at = datetime.fromisoformat(r["at"]).astimezone(TZ)
+                if at > now():
+                    d["reminders"].append({"id": tid(), "title": text, "time": at.strftime("%H:%M"),
+                                           "repeat": "none", "date": at.strftime("%Y-%m-%d")})
+            elif r.get("kind") == "daily":
+                d["reminders"].append({"id": tid(), "title": text, "time": r["time"], "repeat": "daily"})
+            elif r.get("kind") == "weekly":
+                d["reminders"].extend(weekly_items(sorted(r.get("days", [])), r["time"], text))
+        for t in old_t:
+            if not t.get("done"):
+                d["tasks"].append({"id": tid(), "title": t.get("text", ""), "category": "Личное", "priority": "mid",
+                                   "status": "todo", "due": t.get("due") or "", "time": "",
+                                   "created": now().strftime("%Y-%m-%d")})
+        state["reminders"], state["tasks"] = [], []
+        tracker_changed()
+    logger.info(f"В Трекер перенесены старые напоминания ({len(old_r)}) и дела ({len(old_t)})")
+    touch()
 
 
 # ====================== ПАМЯТЬ О ВОВЕ ======================
@@ -1044,9 +1192,19 @@ TOOLS = [
     fn("list_reminders", "Показать все напоминания с номерами"),
     fn("cancel_reminder", "Отменить напоминание: номера через запятую, слово из текста или 'all'",
        {"which": S}, ["which"]),
-    fn("add_task", "Записать дело в ежедневник, опционально со сроком",
-       {"task_text": S, "due": {"type": "string", "description": "ГГГГ-ММ-ДД или пусто"}}, ["task_text"]),
+    fn("add_task", "Записать дело в Трекер Вовы (приложение дел на ноутбуке и в Telegram). "
+                   "Есть дата и время - дело само напомнит о себе в это время",
+       {"task_text": {"type": "string", "description": "коротко, с глагола: 'Сдать эссе по социологии семьи'"},
+        "due": {"type": "string", "description": "ГГГГ-ММ-ДД или пусто"},
+        "time": {"type": "string", "description": "ЧЧ:ММ или пусто"},
+        "category": {"type": "string", "enum": ["Учёба", "Торты", "Работа", "Соцсети", "Личное", "Здоровье"],
+                     "description": "Учёба - СГУ; Торты - канал кондитерской; Работа - CG, карьера, заказы; "
+                                    "Соцсети - свои ролики; Здоровье - еда, вес, спорт; иначе Личное"},
+        "priority": {"type": "string", "enum": ["low", "mid", "high", "crit"]}}, ["task_text", "category"]),
     fn("list_tasks", "Показать открытые дела"),
+    fn("note_for_assistant", "Оставить запись ассистенту на ноутбуке (Claude, 'Пашок') во вкладке Заметки Трекера: "
+                             "задание, которое он сделает, когда Вова откроет ноутбук, или просто заметку",
+       {"text": S, "kind": {"type": "string", "enum": ["task", "note"]}}, ["text"]),
     fn("complete_task", "Отметить дело выполненным по номеру из списка", {"number": {"type": "integer"}}, ["number"]),
     fn("remember_fact", "Запомнить надолго важный факт о Вове, его планах, предпочтениях, проектах", {"fact": S}, ["fact"]),
     fn("forget_fact", "Забыть факт по номеру", {"number": {"type": "integer"}}, ["number"]),
@@ -1066,7 +1224,7 @@ TOOLS = [
 ]
 # То, что можно сделать только по просьбе самого Вовы: чужая страница не должна менять память и дела.
 WEB_TOOLS = {"web_search", "read_site", "ask_last_material"}
-PROTECTED_TOOLS = {"cancel_reminder", "forget_fact", "remember_fact", "complete_task"}
+PROTECTED_TOOLS = {"cancel_reminder", "forget_fact", "remember_fact", "complete_task", "note_for_assistant"}
 
 
 def schedule_tool(day=None):
@@ -1114,7 +1272,9 @@ def run_tool(name, a):
         if name == "cancel_reminder":
             return cancel_reminders(a["which"])
         if name == "add_task":
-            return add_task(a["task_text"], a.get("due"))
+            return add_task(a["task_text"], a.get("due"), a.get("time"), a.get("category"), a.get("priority"))
+        if name == "note_for_assistant":
+            return note_for_assistant(a["text"], a.get("kind") or "task")
         if name == "list_tasks":
             return list_tasks()
         if name == "complete_task":
@@ -1164,6 +1324,8 @@ BASE_PROMPT = """Ты Воскресенье - личный помощник В�
 Правила:
 - Пиши простым языком, коротко, главное в первой строке. Без форматирования (звёздочки, решётки, обратные кавычки), только обычный текст и дефис.
 - Напоминания, дела, расписание, погоду и память делай ТОЛЬКО через инструменты. Никогда не говори "поставил" или "записал", если инструмент не вызывался.
+- Дела и напоминания живут в Трекере Вовы - общем с ноутбуком. Вова надиктовал или написал дела ("завтра сдать эссе, в пятницу в 19 созвон") - каждое отдельно через add_task с датой, временем и категорией. Относительные даты ("завтра", "в пятницу") переводи в ГГГГ-ММ-ДД от текущей даты ниже. Время не названо - оставь пустым. В ответе перечисли, что записал и на когда.
+- "Передай ассистенту", "Пашку", "Клоду", "задание на ноут" - note_for_assistant.
 - Когда Вова просит отменить напоминание без уточнений - сначала вызови list_reminders и спроси, какое.
 - Если в разговоре появился устойчивый факт о Вове (планы, предпочтения, проекты, дедлайны, люди), вызови remember_fact. Мелочи не запоминай. Пароли, коды и номера карт не запоминай никогда.
 - Нужна свежая информация или факт, в котором не уверен - вызови web_search, при необходимости открой подходящий адрес через read_site. В ответе давай прямые ссылки на источники. Просит найти сайт - пришли ссылку.
@@ -1480,6 +1642,8 @@ def cmd_start(m):
                     "Перешли голосовое, кружок, аудио или видео - расшифрую. Пришли ссылку на сайт или видео - "
                     "сделаю выжимку. Фото, скриншот (длинный лучше файлом), PDF, DOCX - прочитаю. "
                     "Спроси что угодно - поищу в интернете.\n\n"
+                    "Трекер: кнопка слева от поля ввода или /tracker. Надиктуй дела голосом - запишу в Трекер, "
+                    "ноутбук подхватит сам.\n"
                     "Напоминания: /reminders, /cancel 2, /cancel all\n"
                     "Дела: /tasks, /done 2\n"
                     "Ссылки на потом: /links, /unlink 2\n"
@@ -1503,7 +1667,7 @@ def cmd_cancel(m):
         return
     a = arg_of(m)
     if not a:
-        bot.reply_to(m, list_reminders() if state["reminders"] else "📭 Отменять нечего")
+        bot.reply_to(m, list_reminders() if sorted_reminders() else "📭 Отменять нечего")
         return
     bot.reply_to(m, cancel_reminders(a))
 
@@ -1624,8 +1788,22 @@ def cmd_status(m):
         "Файлы больше 20 МБ: " + ("включены" if TG_API_ID and TG_API_HASH else "выключены, нет TG_API_ID и TG_API_HASH"),
         "OWNER_ID: " + ("задан" if OWNER_ID else "НЕ задан, память не восстановится после перезапуска"),
         "Копия памяти в чате: " + ("есть" if state.get("sync_msg") else "ещё нет"),
-        f"Напоминаний: {len(state['reminders'])}, дел: {len(open_tasks())}, фактов: {len(state['facts'])}, "
-        f"ссылок: {len(state['links'])}"]))
+        "Сверка с ноутбуком: " + ("ключ SYNC_KEY задан" if SYNC_KEY else "НЕ настроена, нет SYNC_KEY"),
+        f"Трекер: версия {state.get('tracker_rev') or 0}, напоминаний {len(sorted_reminders())}, "
+        f"открытых дел {len(open_tasks())}",
+        f"Фактов: {len(state['facts'])}, ссылок: {len(state['links'])}"]))
+
+
+@bot.message_handler(commands=["tracker"])
+def cmd_tracker(m):
+    if not allowed(m):
+        return
+    if not SELF_URL:
+        bot.reply_to(m, "Не знаю свой адрес в интернете: нет RENDER_EXTERNAL_URL")
+        return
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📋 Открыть Трекер", web_app=telebot.types.WebAppInfo(SELF_URL + "/app/")))
+    bot.reply_to(m, "Трекер - тот же, что на ноутбуке. Кнопка Трекер есть и слева от поля ввода.", reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda c: True)
@@ -1635,7 +1813,7 @@ def on_button(c):
     bot.answer_callback_query(c.id)
     chat_id = c.message.chat.id
     if c.data.startswith("sn:"):
-        text = re.sub(r"^⏰ Напоминание: ", "", c.message.text or "").replace(" (пропущено, пока бот спал)", "")
+        text = re.sub(r"^(⏰ Напоминание|📌 Дело): ", "", c.message.text or "").replace(" (пропущено, пока бот спал)", "")
         result = add_once(now() + timedelta(seconds=int(c.data[3:])), text)
         bot.edit_message_reply_markup(chat_id, c.message.message_id, reply_markup=None)
         bot.send_message(chat_id, result)
@@ -1839,19 +2017,26 @@ def build_brief():
     today = n.strftime("%Y-%m-%d")
     parts = [f"☀️ Доброе утро, Вова! {n.strftime('%d.%m.%Y')}, {WEEKDAYS[n.weekday()]}", "", "🎓 " + lessons_text()]
     tasks = open_tasks()
-    hot = [t for t in tasks if t["due"] and t["due"] <= today]
+    hot = [t for t in tasks if t.get("due") and t["due"] <= today]
     if hot:
-        parts += ["", "🔥 Горит:"] + [f"- {t['text']} (до {t['due']})" for t in hot]
+        now_hot = [t for t in hot if t["due"] == today]
+        late = [t for t in hot if t["due"] < today]
+        if now_hot:
+            parts += ["", "🔥 На сегодня:"] + [f"- {t.get('title', '')}" + (f" в {t['time']}" if t.get("time") else "")
+                                             for t in now_hot]
+        if late:
+            parts += ["", f"⌛ Просрочено: {len(late)}"] + [f"- {t.get('title', '')} ({t['due']})" for t in late[-5:]]
+            if len(late) > 5:
+                parts.append("  остальное - в Трекере")
     rest = len(tasks) - len(hot)
     if rest:
         parts.append(f"\nЕщё открытых дел: {rest} (/tasks)")
-    repeat = [r for r in sorted_reminders() if r["kind"] == "daily" or
-              (r["kind"] == "weekly" and n.weekday() in r["days"])]
-    today_once = [r for r in sorted_reminders() if r["kind"] == "once" and r["at"][:10] == today]
-    if repeat or today_once:
-        parts += ["", "⏰ Сегодня напомню:"]
-        parts += [f"- {r['time']} {r['text']}" for r in repeat]
-        parts += [f"- {fmt_dt(r['at'])[6:]} {r['text']}" for r in today_once]
+    d, _ = tracker_copy()
+    events = sorted((when, text) for key, when, text, _ in tracker_events(d, n.date())
+                    if key.startswith("r:") and when >= n)
+    if events:
+        parts += ["", "⏰ Сегодня напомню:"] + [f"- {when.strftime('%H:%M')} {text.split(': ', 1)[-1]}"
+                                                for when, text in events]
     parts += ["", "🌤 " + get_weather()]
     return "\n".join(parts)
 
@@ -1888,6 +2073,100 @@ def health():
     return {"status": "ok", "time": now().isoformat()}
 
 
+# ---------- мини-приложение Трекера и сверка с ноутбуком ----------
+READY = {"ok": False}  # пока память не загружена из чата, данные Трекера не отдаём и не принимаем
+
+
+def webapp_user_id(init_data):
+    """Проверка подписи Telegram: страницу открыл именно этот бот и именно этот человек."""
+    if not init_data:
+        return None
+    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+    sign = pairs.pop("hash", "")
+    check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret = hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
+    if not hmac.compare_digest(hmac.new(secret, check.encode(), hashlib.sha256).hexdigest(), sign):
+        return None
+    if time.time() - int(pairs.get("auth_date") or 0) > 30 * 86400:
+        return None
+    try:
+        return json.loads(pairs.get("user") or "{}").get("id")
+    except json.JSONDecodeError:
+        return None
+
+
+def api_allowed():
+    key = request.headers.get("X-Sync-Key", "")
+    if SYNC_KEY and key and hmac.compare_digest(key, SYNC_KEY):
+        return True
+    uid = webapp_user_id(request.headers.get("X-Init-Data", ""))
+    return uid is not None and uid == state.get("owner")
+
+
+def api_guard():
+    if not api_allowed():
+        return {"error": "forbidden"}, 403
+    if not READY["ok"]:
+        return {"error": "starting"}, 503
+    return None
+
+
+@app.route("/api/tracker", methods=["GET"])
+def api_tracker_get():
+    bad = api_guard()
+    if bad:
+        return bad
+    data, rev = tracker_copy()
+    return {"data": data, "rev": rev}
+
+
+@app.route("/api/tracker/rev", methods=["GET"])
+def api_tracker_rev():
+    bad = api_guard()
+    if bad:
+        return bad
+    return {"rev": str(state.get("tracker_rev") or 0)}
+
+
+@app.route("/api/tracker", methods=["POST"])
+def api_tracker_put():
+    bad = api_guard()
+    if bad:
+        return bad
+    body = request.get_json(force=True, silent=True) or {}
+    data = body.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
+        return {"error": "bad data"}, 400
+    with lock:
+        cur = str(state.get("tracker_rev") or 0)
+        if str(body.get("rev")) != cur:  # кто-то успел поменять раньше - отдаём свежее, ничего не затираем
+            return {"conflict": True, "data": json.loads(json.dumps(tr())), "rev": cur}
+        state["tracker"] = data
+        tracker_changed()
+        rev = str(state["tracker_rev"])
+    touch()
+    return {"conflict": False, "rev": rev}
+
+
+@app.route("/app/")
+@app.route("/app/<path:name>")
+def webapp(name="index.html"):
+    resp = send_from_directory(WEBAPP_DIR, name)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+def setup_menu_button():
+    """Кнопка Трекера слева от поля ввода."""
+    if not (SELF_URL and state.get("owner")):
+        return
+    try:
+        bot.set_chat_menu_button(state["owner"], telebot.types.MenuButtonWebApp(
+            text="Трекер", web_app=telebot.types.WebAppInfo(SELF_URL + "/app/")))
+    except Exception as e:
+        logger.error(f"menu button: {e}")
+
+
 def self_ping():
     # Render free усыпляет сервис через 15 минут без входящих запросов - будим сами себя
     if SELF_URL:
@@ -1898,11 +2177,11 @@ def self_ping():
 
 
 def restore_jobs():
-    for rem in list(state["reminders"]):
-        try:
-            schedule_reminder(rem)
-        except Exception as e:
-            logger.error(f"restore {rem}: {e}")
+    try:
+        migrate_old()
+    except Exception as e:
+        logger.error(f"migrate_old: {e}", exc_info=True)
+    scheduler.add_job(tracker_tick, "interval", seconds=20, id="tracker_tick", replace_existing=True)
     schedule_brief()
     scheduler.add_job(self_ping, "interval", minutes=10, id="self_ping", replace_existing=True)
 
@@ -1936,10 +2215,13 @@ if __name__ == "__main__":
     Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))), daemon=True).start()
     scheduler.start()
     found_pin = load_state()
+    READY["ok"] = True
     restore_jobs()
     startup_notes(found_pin)
+    setup_menu_button()
     try:
         bot.set_my_commands([
+            telebot.types.BotCommand("tracker", "открыть Трекер"),
             telebot.types.BotCommand("reminders", "список напоминаний"),
             telebot.types.BotCommand("cancel", "отменить напоминание: /cancel 2 или all"),
             telebot.types.BotCommand("tasks", "открытые дела"),
