@@ -2155,7 +2155,8 @@ def api_tracker_get():
     if bad:
         return bad
     data, rev = tracker_copy()
-    return {"data": data, "rev": rev, "brain_hash": (state.get("brain") or {}).get("hash", "")}
+    return {"data": data, "rev": rev, "brain_hash": (state.get("brain") or {}).get("hash", ""),
+            "owner": state.get("owner")}
 
 
 @app.route("/api/brain", methods=["POST"])
