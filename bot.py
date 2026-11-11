@@ -63,7 +63,8 @@ VISION_MODEL = "qwen/qwen3.8-27b"
 WHISPER_MODEL = "whisper-large-v3-turbo"
 STATE_FILE = "bot_state.json"
 STATE_NAME = "bot_state.json"
-STATE_CAPTION = "Резервная копия памяти бота. Не удаляй и не откручивай."
+def state_caption():
+    return f"🗄 Память бота и Трекер, копия от {now().strftime('%d.%m %H:%M')}\nОбновляется сама и без звука. Не открепляй."
 
 MAX_BOT_API_FILE = 20_000_000   # больше Bot API скачать не даст
 WHISPER_MAX_FILE = 24_000_000   # лимит Groq на бесплатном плане - 25 МБ
@@ -166,7 +167,7 @@ def sync_remote():
         old = state.get("sync_msg")
         if old:
             try:
-                bot.edit_message_media(telebot.types.InputMediaDocument(state_file(), caption=STATE_CAPTION),
+                bot.edit_message_media(telebot.types.InputMediaDocument(state_file(), caption=state_caption()),
                                        chat_id=owner, message_id=old)
                 logger.info("Состояние обновлено в чате")
                 return
@@ -174,7 +175,7 @@ def sync_remote():
                 if "not modified" in str(e):
                     return
                 logger.warning(f"Не смог обновить файл состояния, шлю новый: {e}")
-        sent = bot.send_document(owner, state_file(), caption=STATE_CAPTION, disable_notification=True)
+        sent = bot.send_document(owner, state_file(), caption=state_caption(), disable_notification=True)
         bot.pin_chat_message(owner, sent.message_id, disable_notification=True)
         with lock:
             state["sync_msg"] = sent.message_id
