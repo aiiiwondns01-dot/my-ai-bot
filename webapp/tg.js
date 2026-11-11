@@ -3,7 +3,12 @@
 // (get_data, save_data, mtime). Здесь эти три функции ходят на сервер бота вместо data.json.
 (function () {
   const tg = window.Telegram && window.Telegram.WebApp;
-  const initData = (tg && tg.initData) || '';
+  // скрипт telegram.org может не загрузиться (блокировки, VPN) - тогда подпись берём из адреса,
+  // Telegram сам кладёт её туда при открытии мини-приложения
+  const fromHash = () => {
+    try { return new URLSearchParams(location.hash.slice(1)).get('tgWebAppData') || ''; } catch (e) { return ''; }
+  };
+  const initData = (tg && tg.initData) || fromHash();
   let rev = '';
   let lastCheck = 0;
 
@@ -19,6 +24,17 @@
     return r.json();
   }
 
+  // вместо "data.json не читается" - понятная причина
+  function showError(e) {
+    const why = String(e && e.message);
+    const text = why === 'forbidden'
+      ? 'Бот тебя не узнал. Напиши ему любое сообщение и открой Трекер снова.'
+      : why === 'http 503'
+        ? 'Бот просыпается - подожди полминуты и открой Трекер снова.'
+        : 'Нет связи с ботом (' + why + '). Попробуй через минуту.';
+    setTimeout(() => { document.getElementById('main').innerHTML = '<div class="loading">' + text + '</div>'; }, 0);
+  }
+
   window.pywebview = {
     api: {
       async get_data() {
@@ -27,6 +43,7 @@
           rev = r.rev;
           return { ok: true, data: r.data, mtime: r.rev };
         } catch (e) {
+          showError(e);
           return { ok: false };
         }
       },
@@ -65,11 +82,16 @@
     if (e.target.closest('.nav button')) window.scrollTo(0, 0);
   });
 
-  if (tg) {
-    tg.ready();
-    tg.expand();
-    try { tg.setHeaderColor('#1a1d1a'); tg.setBackgroundColor('#111311'); } catch (e) { /* старый Telegram */ }
+  // скрипт Telegram грузится без ожидания: если telegram.org недоступен, Трекер всё равно откроется
+  function setupTg() {
+    const w = window.Telegram && window.Telegram.WebApp;
+    if (!w) return;
+    w.ready();
+    w.expand();
+    try { w.setHeaderColor('#1a1d1a'); w.setBackgroundColor('#111311'); } catch (e) { /* старый Telegram */ }
   }
+  if (tg) setupTg();
+  else { const s = document.getElementById('tgjs'); if (s) s.addEventListener('load', setupTg); }
   if (!initData) {
     document.getElementById('main').innerHTML =
       '<div class="loading">Открой Трекер через бота в Telegram: кнопка Трекер слева от поля ввода или команда /tracker.</div>';
